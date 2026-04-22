@@ -1,0 +1,61 @@
+cabal-version:      3.0
+name:               tasty-cache
+version:            0.1.0.0
+synopsis:           Tasty ingredient that skips unchanged tests using GHC HIE files
+description:
+  A Tasty ingredient that fingerprints each test against its source bytes and
+  the transitive closure of its dependencies in the HIE identifier graph.
+  Tests whose fingerprint matches the cache are replaced with an instant-pass
+  placeholder; only stale tests execute.
+  .
+  Add @-fwrite-ide-info -hiedir .hie@ to both your library and test-suite
+  stanzas, then replace 'defaultMain' with 'defaultMainWithHieCache'.
+  .
+  Requires GHC >= 9.8.
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             Noon van der Silk
+maintainer:         Noon van der Silk
+category:           Testing
+build-type:         Simple
+extra-doc-files:    README.md CHANGELOG.md
+tested-with:        GHC == 9.8.4
+
+source-repository head
+  type:     git
+  location: https://github.com/silky/tasty-cache
+
+library
+  exposed-modules:  Test.Tasty.HieCache
+  hs-source-dirs:   src
+  build-depends:
+    , base        >= 4.18 && < 5
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , ghc         >= 9.8
+    , tasty
+  default-language: Haskell2010
+  ghc-options:      -Wall -fwrite-ide-info -hiedir .hie
+
+test-suite tests
+  type:             exitcode-stdio-1.0
+  main-is:          Main.hs
+  hs-source-dirs:   test
+  other-modules:
+    Arithmetic
+    CPPDemo
+    Diamond
+    Expr
+    Lib
+    Meta
+    Parity
+  build-depends:
+    , base             >= 4.18 && < 5
+    , tasty-cache
+    , tasty
+    , tasty-hunit
+    , template-haskell
+  default-language: Haskell2010
+  ghc-options:      -Wall -fwrite-ide-info -hiedir .hie

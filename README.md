@@ -1,0 +1,410 @@
+# tasty-cache
+
+A [Tasty](https://hackage.haskell.org/package/tasty) ingredient that skips
+tests whose source hasn't changed since the last passing run, using GHC HIE
+files for fine-grained dependency tracking.
+
+## Quick start
+
+**1. Emit HIE files** — add to **both** your `library` and `test-suite`
+stanzas in your `.cabal` file:
+
+```cabal
+library
+  -- ... your other fields ...
+  ghc-options: -fwrite-ide-info -hiedir .hie
+
+test-suite tests
+  -- ... your other fields ...
+  ghc-options: -fwrite-ide-info -hiedir .hie
+```
+
+Both stanzas need these flags because the cache reads the HIE files for your
+library modules (to follow dependency chains) *and* your test module (to find
+the test body source).
+
+**2. Add to `.gitignore`:**
+
+```
+.hie/
+.cache/
+```
+
+**3. Replace `defaultMain`** and wrap the test groups you want cached:
+
+```haskell
+import Test.Tasty.HieCache (defaultMainWithHieCache, cacheable)
+
+main :: IO ()
+main = defaultMainWithHieCache tests
+
+tests :: TestTree
+tests = testGroup "all"
+  [ cacheable $ testGroup "pure unit tests"
+      [ testCase "add 1 2 == 3" $ add 1 2 @?= 3
+      , testCase "factorial 5"  $ factorial 5 @?= 120
+      ]
+  , testGroup "integration tests"   -- no cacheable → always runs
+      [ testCase "..." $ ...
+      ]
+  ]
+```
+
+`cacheable` works on any `TestTree` — `testGroup`, `testCase`, `testProperty`
+(QuickCheck), `testSpec` (Hspec), or any other Tasty provider. Wrap at
+whatever granularity makes sense.
+
+Only tests wrapped with `cacheable` are ever skipped. Unwrapped tests run
+unconditionally on every invocation, making `cacheable` safe to omit for tests
+with side-effects, network access, or flaky behaviour.
+
+**Why is caching opt-in?** Integration tests, database tests, and other
+effectful tests should always run — their correctness depends on external
+state, not just source bytes. `cacheable` is a deliberate signal that a test
+is pure and repeatable.
+
+Requires **GHC >= 9.8**.
+
+### What if I forget the flags?
+
+If the `.hie` directory doesn't exist, the ingredient logs a warning and runs
+all tests normally — no crash, no silent skipping. You'll see:
+
+```
+HieCache: no .hie directory, running all tests
+```
+
+If fingerprinting fails for any other reason (unreadable HIE file, parse
+error), the ingredient falls back to running all tests and logs the error to
+stderr.
+
+## How it works
+
+GHC can emit **HIE (Haskell Interface Extended) files** — binary files
+containing the full typed AST of each compiled module, including the source
+bytes and a record of every identifier's definition site and every use site.
+`tasty-cache` reads these files to compute a fingerprint for each
+`cacheable` test:
+
+```
+fingerprint = hash(body_hash, dep_hash, cabal_hash)
+
+body_hash   = hash of the testCase expression's source bytes
+dep_hash    = hash of the source bytes of every declaration transitively
+              reachable from the test body via the HIE identifier graph
+cabal_hash  = hash of all .cabal files in the project root
+```
+
+The transitive dependency set is computed by BFS over the HIE identifier
+graph, starting from the names used in the test body and following `Use`
+references through every reachable declaration in every library module.
+
+On each run the ingredient compares fingerprints against a cache
+(`.cache/hie-tasty-cache`). Tests whose fingerprint is unchanged are replaced
+with an instant-pass placeholder (`OK (cached)`); only stale tests execute.
+The cache is updated per-test as each passing test completes, so a
+partially-failing run still advances the cache for the tests that passed.
+
+## Output
+
+**First run** — cache is empty, all tests execute:
+
+```
+scenarios
+  Lib (basic direct dependency)
+    add 1 2 == 3:       OK
+    add 0 0 == 0:       OK
+    factorial 5 == 120: OK
+  Parity (mutual recursion — always runs)
+    isEven 0:           OK
+    ...
+All 35 tests passed (0.02s)
+```
+
+**Second run** — nothing changed; `cacheable` groups are served from cache,
+unwrapped groups run again:
+
+```
+HieCache: skipping 20 cached test(s)
+scenarios
+  Lib (basic direct dependency)
+    add 1 2 == 3:       OK (cached)
+    add 0 0 == 0:       OK (cached)
+    factorial 5 == 120: OK (cached)
+  Parity (mutual recursion — always runs)
+    isEven 0:           OK
+    isEven 4:           OK
+    ...
+  Expr (GADT)
+    eval Lit:           OK (cached)
+    ...
+  Diamond (transitive deps)
+    base 5 == 6:        OK (cached)
+    ...
+  Arithmetic (Template Haskell — always runs)
+    add5 3 == 8:        OK
+    ...
+All 35 tests passed (0.00s)
+```
+
+**After editing `factorial`** — only the `factorial` test re-runs within the
+`cacheable` group; `add` tests remain cached:
+
+```
+HieCache: skipping 19 cached test(s)
+scenarios
+  Lib (basic direct dependency)
+    add 1 2 == 3:       OK (cached)
+    add 0 0 == 0:       OK (cached)
+    factorial 5 == 120: OK
+```
+
+## What gets invalidated
+
+The dep hash covers the **transitive closure** of the HIE identifier graph:
+
+| Change | Tests that re-run |
+|---|---|
+| Edit `factorial` | Tests that call `factorial` (directly or transitively) |
+| Edit `add` | Tests that call `add`; `factorial` tests are unaffected |
+| Edit `base` in a diamond dependency | All tests depending on `base`, `partA`, `partB`, `combined` |
+| Edit `isEven` | `isEven` tests **and** `isOdd` tests (since `isOdd` calls `isEven`) |
+| Edit a TH template body (`adderExpr`) | Tests using that splice (`add5`, `add10`) but not others (`timesBy3`) |
+| Change `#define SCALE_FACTOR` | All tests in that CPP module (whole-file hashed) |
+| Add/remove a `{-# LANGUAGE #-}` pragma | All tests that transitively depend on that module |
+| Edit a `.cabal` file | All `cacheable` tests (cabal hash covers `default-extensions` etc.) |
+| Edit an unrelated function | Nothing — those tests stay cached |
+| Any change to a non-`cacheable` test | That test always runs anyway |
+
+## Advanced usage
+
+If you are composing Tasty ingredients manually (e.g. alongside `tasty-rerun`
+or a custom reporter), use `hieCacheIngredient` directly instead of
+`defaultMainWithHieCache`:
+
+```haskell
+import Test.Tasty.HieCache (hieCacheIngredient)
+import Test.Tasty.Runners  (defaultIngredients)
+
+main :: IO ()
+main = defaultMainWithIngredients myIngredients tests
+  where
+    myIngredients =
+      hieCacheIngredient defaultIngredients
+        : defaultIngredients
+        ++ [myCustomIngredient]
+```
+
+`hieCacheIngredient` takes the list of sub-ingredients it should delegate
+actual test execution to. Pass your full ingredient list so that all normal
+Tasty behaviour (parallel execution, filtering with `-p`, XML output, etc.)
+continues to work.
+
+## Caveats for real-world projects
+
+### `occName` collision (the most common false positive)
+
+Dependencies are matched by **occurrence name** — the bare string `"show"`,
+`"=="`, `"compare"`, `"fmap"` — rather than by GHC's fully-qualified `Name`
+unique. This means every module that defines a binding with the same short
+name contributes to the dep map, and the BFS follows all of them.
+
+In practice: **any project using `deriving Show`, `Eq`, `Ord`, or `Functor`
+will see over-broad invalidations.** Adding `deriving Show` to a new type
+anywhere in the project causes the BFS to follow `"show"` into that module too,
+and tests that transitively call `show` on *any* type will be re-run
+unnecessarily.
+
+The fingerprints are still *correct* (no false negatives — a test never
+wrongly stays cached), but the cache hit rate may be lower than expected in
+projects with many derived instances.
+
+### HLS interaction
+
+HLS (Haskell Language Server) also writes HIE files to the `.hie` directory.
+HIE files are deterministic for a given source file and set of flags, so in
+normal usage HLS and `cabal test` produce identical files and there is no
+conflict.
+
+However, if HLS is configured with different `ghc-options` than the
+`test-suite` stanza (e.g. HLS omits `-O`, or uses a different set of language
+extensions via `haskell-language-server.json`), the HIE files written by HLS
+may differ from those produced by `cabal test`, causing fingerprints to be
+computed against stale AST data. If you observe unexpected cache misses or
+hits, check that both HLS and `cabal test` use the same flags.
+
+### Parallel test runs
+
+`tasty-cache` updates the in-memory cache with `modifyIORef'` as each test
+passes, then writes it to disk once at the end. If Tasty runs tests in
+parallel (the default), two tests passing concurrently will race on the
+`IORef` — each reads the current map, adds its key, and writes back, and one
+write can overwrite the other's entry. The affected tests will simply re-run
+on the next invocation rather than being cached. The cache is never *wrong*
+as a result, only incomplete.
+
+Separately, running two `cabal test` processes concurrently (e.g. in a CI
+matrix) will race on the cache file on disk; the last write wins.
+
+### GHC version compatibility
+
+Tested on **GHC 9.8**. The implementation imports `GHC.Iface.Ext.*` and
+`GHC.Types.*`, which are internal GHC APIs with no stability guarantee. GHC
+9.10 and 9.12 are untested; a minor release is a potential breakage point.
+
+## Cache location
+
+`.cache/hie-tasty-cache` — a plain-text file. Safe to delete at any time;
+deleting it causes all `cacheable` tests to run on the next invocation.
+
+## Test scenarios
+
+The bundled test suite (`test/Main.hs`) contains 35 tests across 6 modules,
+demonstrating the range of dependency patterns the cache handles:
+
+| Module | `cacheable`? | What it demonstrates |
+|---|---|---|
+| `Lib` | yes | Basic direct dep — editing `factorial` doesn't invalidate `add` tests |
+| `Parity` | no | Always runs; mutual recursion — `isEven`/`isOdd` call each other |
+| `Expr` | yes | GADT — `eval` and `pretty` are independent; editing one doesn't invalidate the other |
+| `Diamond` | yes | Diamond deps — `combined → partA/partB → base`; editing `base` invalidates all four |
+| `Arithmetic` | no | Always runs; Template Haskell — splice dependency tracking |
+| `CPPDemo` | no | Always runs; CPP `#define` changes caught via whole-file hashing |
+
+## Known limitations
+
+### False negatives (tests skip when they should run)
+
+**Missing fingerprint treated as cached.** If a test's name cannot be located
+in the HIE source (dynamically constructed names, unusual formatting), its
+fingerprint is absent. Since an absent fingerprint compares equal to an absent
+cache entry, the test is treated as cached and never runs.
+
+**`findExprEnd` stops at blank lines.** The indentation heuristic that
+determines where a `testCase` expression ends treats a blank line as a
+terminator. A multi-line `do`-block test with an internal blank line will have
+its body hash computed only up to that blank line; edits after it are invisible
+to the cache.
+
+**Top-level helpers in the test module are not tracked.** The entire test
+module is excluded from the BFS to avoid including test bodies as their own
+dependencies. If `Main.hs` defines a helper used by tests, changing it does
+not invalidate those tests.
+
+**Multi-line pragmas only partially captured.** The pragma-line detector
+matches lines beginning with `{-#`. A pragma written across multiple lines has
+its continuation lines omitted from the hash.
+
+### False positives (tests run when they don't need to)
+
+**`occName` collision across modules** — see [Caveats for real-world
+projects](#caveats-for-real-world-projects) above.
+
+**`GeneratedInfo` nodes included.** The HIE `SourcedNodeInfo` structure
+distinguishes user-written source (`SourceInfo`) from generated code
+(`GeneratedInfo`; derived instances, TH splices). The implementation currently
+treats both identically, so generated bindings pollute the dep map and may
+cause unnecessary invalidations.
+
+### GHC internals coupling
+
+**Internal GHC API.** The implementation imports `GHC.Iface.Ext.*` and
+`GHC.Types.*`, which are not stable public APIs. This already broke once
+between GHC 9.6 and 9.8 (`nodeInfo` → `sourcedNodeInfo`).
+
+**`hie_hs_src` vs post-CPP spans.** For CPP modules, `hie_hs_src` stores the
+raw pre-CPP source while HIE AST spans refer to the post-CPP source. With
+`#if`/`#ifdef` blocks the line numbers can diverge. The current whole-file
+hashing sidesteps this for simple `#define` cases only.
+
+**`ValBind` node span is undocumented.** The code assumes the HIE node
+carrying a `ValBind` identifier has a span covering the full equation. This is
+true in GHC 9.8 but is an implementation detail with no documented guarantee.
+
+### Architecture
+
+**Duplicate test names.** Two tests in different groups with the same leaf
+name collide in `leafMap`; only one fingerprint is computed. The other test
+falls into the "missing fingerprint" case and is silently cached forever.
+
+**String-search test location.** A test's source position is found by
+searching for its quoted name in `hie_hs_src`. A test named `"error"` matches
+the first occurrence of `"error"` anywhere in the file.
+
+---
+
+## How this was built
+
+This project was developed interactively with Claude. The prompts that produced
+it, in order:
+
+(Human's note: I only started tracking the prompts after a few initial
+ iterations; but hopefully how I started is clear to you; just basically "Can
+ ou write me a nix-style caching mechanism for test function dependencies,
+ based on HIE files.")
+
+1. *Can you fix the compile-time errors and check that your implementation does
+   the correct thing — i.e. caches the results of tests whose dependent
+   functions do not have AST changes. It will work if you can change `factorial`
+   and see that the other two tests are CACHED, and not re-evaluated.*
+
+2. *Can you update the readme now and make sure it is accurate?*
+
+3. *Can you now try and come up with some very interesting and complex
+   dependency tree scenarios, and test them? I'm thinking about at least
+   interesting source code dependencies; but also functions that involve
+   Template Haskell, CPP, GADTs.*
+
+4. *What's the fix?*
+
+5. *Is it at all possible to get the cached output to render as "OK (cached)"
+   instead of "cached" on a subsequent line?*
+
+6. *Okay; and you can confirm that this implementation fixes every bug you
+   observed above?*
+
+7. *Can you also do a test to check that adding or removing an extension
+   re-runs either only tests that would be affected, or at least all the tests
+   in the relevant file?*
+
+8. *Okay. I would like you now to take an extremely close look, taking the
+   perspective of a core contributor to the GHC project, and reflect upon any
+   limitations in this implementation. Take your time, and think it through
+   from many different perspectives.*
+
+9. *Can you think of a nice name for this project?*
+
+10. *Can you rename this project to tasty-cache.*
+
+11. *Can you update the README now to reflect the current output and state of
+    the project? Please also take care to document known limitations. Also, can
+    you provide a section at the end, that lists all the prompts I typed into
+    Claude in order to get it to this state?*
+
+12. *Can you make sure that the cache is invalidated for the entire source tree
+    if a (new) default extension is added in the cabal file. Can you test this?
+    (Manually; you don't need to write a test for it.)*
+
+13. *Can you now make this an opt-in ability; i.e. the tests that you want
+    cached must be wrapped with a certain `cacheable` function? Then demonstrate
+    this in action.*
+
+14. *Cool; can you make sure the documentation is up to date with this
+    information?*
+
+15. *Can you fix the warnings from `nix fmt`?*
+
+16. *Again, make sure the readme is up to date and shows how to use the
+    features of this library really cleanly.*
+
+17. *Are there any issues you think Haskellers will have using this library?
+    Can you think of anything confusing to either extremely experienced
+    Haskellers, and complete beginners? Reflect on this situation, and think
+    about what would need to change, and/or add some explanations to the
+    Readme.*
+
+18. *Can you make sure the CHANGELOG is representative of the features actually
+    present in the first version?*
+
+19. *Any final changes you'd like to make before we release the first version?
+    If not, make sure the readme contains the final list of inputs to claude.*
