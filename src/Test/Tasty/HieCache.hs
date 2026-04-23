@@ -70,6 +70,7 @@ import           Data.List                 (intercalate, sort)
 import           Data.Map.Strict           (Map)
 import qualified Data.Map.Strict           as Map
 import           Data.Maybe                (listToMaybe)
+import           Data.Proxy                (Proxy (..))
 import           Data.Set                  (Set)
 import qualified Data.Set                  as Set
 import           Data.Typeable             (Typeable)
@@ -85,8 +86,10 @@ import           System.IO                 (hPutStrLn, stderr)
 import           System.IO.Unsafe          (unsafePerformIO)
 
 import           Test.Tasty
-import           Test.Tasty.Options        (IsOption (..), OptionSet,
-                                            lookupOption, safeRead)
+import           Test.Tasty.Options        (IsOption (..),
+                                            OptionDescription (..), OptionSet,
+                                            lookupOption, mkFlagCLParser,
+                                            safeRead)
 import           Test.Tasty.Providers      (IsTest (..), testPassed)
 import           Test.Tasty.Runners
 
@@ -130,6 +133,16 @@ instance IsOption HieCacheEnabled where
   optionName     = return "hie-cache"
   optionHelp     = return "Enable HIE-based caching for this test subtree"
 
+-- | CLI flag: pass @--disable-tasty-cache@ to disable all caching.
+newtype HieCacheDisable = HieCacheDisable Bool deriving (Eq, Ord, Typeable)
+
+instance IsOption HieCacheDisable where
+  defaultValue   = HieCacheDisable False
+  parseValue s   = HieCacheDisable <$> safeRead s
+  optionName     = return "disable-tasty-cache"
+  optionHelp     = return "Disable HIE-based caching entirely (run every test regardless of cacheable)"
+  optionCLParser = mkFlagCLParser mempty (HieCacheDisable True)
+
 -- ---------------------------------------------------------------------------
 -- Ingredient
 
@@ -137,43 +150,49 @@ instance IsOption HieCacheEnabled where
 -- 'defaultIngredients') and intercepts test execution to serve cached results.
 -- Use this directly if you need to compose it with other custom ingredients.
 hieCacheIngredient :: [Ingredient] -> Ingredient
-hieCacheIngredient subIngredients = TestManager [] $ \opts tree -> Just $ do
+hieCacheIngredient subIngredients = TestManager [Option (Proxy :: Proxy HieCacheDisable)] $ \opts tree -> Just $ do
+  let HieCacheDisable disabled = lookupOption opts
   let hieDir    = ".hie"
       cachePath = ".cache" </> "hie-tasty-cache"
 
-  hieExists <- doesDirectoryExist hieDir
-  if not hieExists
+  if disabled
     then do
-      hPutStrLn stderr "HieCache: no .hie directory, running all tests"
+      hPutStrLn stderr "HieCache: caching disabled, running all tests"
       runAll subIngredients opts tree
     else do
-      let paths = collectPaths tree
+      hieExists <- doesDirectoryExist hieDir
+      if not hieExists
+        then do
+          hPutStrLn stderr "HieCache: no .hie directory, running all tests"
+          runAll subIngredients opts tree
+        else do
+          let paths = collectPaths tree
 
-      fps <- computeFingerprints hieDir paths
-               `catch` \(e :: SomeException) -> do
-                 hPutStrLn stderr $ "HieCache: fingerprint error: " ++ show e
-                 return Map.empty
+          fps <- computeFingerprints hieDir paths
+                   `catch` \(e :: SomeException) -> do
+                     hPutStrLn stderr $ "HieCache: fingerprint error: " ++ show e
+                     return Map.empty
 
-      cache <- loadCache cachePath
+          cache <- loadCache cachePath
 
-      let stale = Set.fromList
-            [ p | p <- paths
-            , Map.lookup (pathKey p) fps /= Map.lookup (pathKey p) cache ]
+          let stale = Set.fromList
+                [ p | p <- paths
+                , Map.lookup (pathKey p) fps /= Map.lookup (pathKey p) cache ]
 
-      let freshCount = length paths - Set.size stale
-      when (freshCount > 0) $
-        hPutStrLn stderr $
-          "HieCache: skipping " ++ show freshCount ++ " cached test(s)"
+          let freshCount = length paths - Set.size stale
+          when (freshCount > 0) $
+            hPutStrLn stderr $
+              "HieCache: skipping " ++ show freshCount ++ " cached test(s)"
 
-      cacheRef <- newIORef cache
-      let wrapped = wrapAndFilterTree stale [] mempty cacheRef fps tree
+          cacheRef <- newIORef cache
+          let wrapped = wrapAndFilterTree stale [] mempty cacheRef fps tree
 
-      result <- runAll subIngredients opts wrapped
+          result <- runAll subIngredients opts wrapped
 
-      finalCache <- readIORef cacheRef
-      createDirectoryIfMissing True ".cache"
-      saveCache cachePath finalCache
-      return result
+          finalCache <- readIORef cacheRef
+          createDirectoryIfMissing True ".cache"
+          saveCache cachePath finalCache
+          return result
   where
     runAll ingredients opts t =
       case tryIngredients ingredients opts t of

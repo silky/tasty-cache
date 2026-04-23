@@ -176,6 +176,24 @@ The dep hash covers the **transitive closure** of the HIE identifier graph:
 | Edit an unrelated function | Nothing — those tests stay cached |
 | Any change to a non-`cacheable` test | That test always runs anyway |
 
+## Disabling the cache
+
+To force every test to run — ignoring all cached results and `cacheable`
+labels — pass `--disable-tasty-cache`:
+
+```
+cabal test --test-options="--disable-tasty-cache"
+```
+
+You'll see:
+
+```
+HieCache: caching disabled, running all tests
+```
+
+This is useful for CI jobs that must run the full suite, or when you suspect
+a stale cache and want a clean baseline without deleting `.cache/hie-tasty-cache`.
+
 ## Advanced usage
 
 If you are composing Tasty ingredients manually (e.g. alongside `tasty-rerun`
@@ -340,7 +358,7 @@ it, in order:
 
 (Human's note: I only started tracking the prompts after a few initial
  iterations; but hopefully how I started is clear to you; just basically "Can
- ou write me a nix-style caching mechanism for test function dependencies,
+ you write me a nix-style caching mechanism for test function dependencies,
  based on HIE files.")
 
 1. *Can you fix the compile-time errors and check that your implementation does
@@ -408,3 +426,11 @@ it, in order:
 
 19. *Any final changes you'd like to make before we release the first version?
     If not, make sure the readme contains the final list of inputs to claude.*
+
+20. *Can you add a command-line option that will disable caching entirely, for
+    every test, whether or not it is labelled with `cacheable`?*
+
+21. *Please don't require me to set "--no-hie-cache=True"; just make the flag
+    called "--disable-tasty-cache"*
+
+22. *Can you document this option in the README?*
