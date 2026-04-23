@@ -4,6 +4,9 @@ A [Tasty](https://hackage.haskell.org/package/tasty) ingredient that skips
 tests whose source hasn't changed since the last passing run, using GHC HIE
 files for fine-grained dependency tracking.
 
+Note: This project was built almost entirely with AI; see [How this was
+built](#how-this-was-built) for the prompts.
+
 ## Quick start
 
 **1. Emit HIE files** — add to **both** your `library` and `test-suite`
@@ -359,7 +362,8 @@ it, in order:
 (Human's note: I only started tracking the prompts after a few initial
  iterations; but hopefully how I started is clear to you; just basically "Can
  you write me a nix-style caching mechanism for test function dependencies,
- based on HIE files.")
+ based on HIE files." Credit to [@gacafe](https://github.com/gacafe) for
+ suggesting this approach to AI transparency.)
 
 1. *Can you fix the compile-time errors and check that your implementation does
    the correct thing — i.e. caches the results of tests whose dependent
