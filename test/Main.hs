@@ -8,6 +8,7 @@ import           Arithmetic          (add10, add5, timesBy3)
 import           CPPDemo             (cppVersion, scaled)
 import           Diamond             (base, combined, partA, partB)
 import           Expr                (Expr (..), eval, pretty)
+import           FalseNegatives      (falseNegativeTests)
 import           Lib                 (add, factorial)
 import           Parity              (collatz, isEven, isOdd)
 
@@ -76,4 +77,7 @@ tests = testGroup "scenarios"
     , testCase "scaled 0 == 0"  $ scaled 0   @?= 0
     , testCase "cppVersion"     $ cppVersion @?= "v3"
     ]
+
+  -- False-negative demonstration tests (always runs).
+  , falseNegativeTests
   ]

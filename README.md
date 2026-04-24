@@ -1,11 +1,16 @@
+
+> [!Note]
+> Note: This project was built almost entirely with AI; see
+> [How this was built](#how-this-was-built) for the prompts.
+>
+> A human did, however, read over the readme and find it acceptable.
+
+
 # tasty-cache
 
 A [Tasty](https://hackage.haskell.org/package/tasty) ingredient that skips
 tests whose source hasn't changed since the last passing run, using GHC HIE
 files for fine-grained dependency tracking.
-
-Note: This project was built almost entirely with AI; see [How this was
-built](#how-this-was-built) for the prompts.
 
 ## Quick start
 
@@ -121,7 +126,7 @@ scenarios
   Parity (mutual recursion — always runs)
     isEven 0:           OK
     ...
-All 35 tests passed (0.02s)
+All 45 tests passed (0.02s)
 ```
 
 **Second run** — nothing changed; `cacheable` groups are served from cache,
@@ -147,7 +152,7 @@ scenarios
   Arithmetic (Template Haskell — always runs)
     add5 3 == 8:        OK
     ...
-All 35 tests passed (0.00s)
+All 45 tests passed (0.00s)
 ```
 
 **After editing `factorial`** — only the `factorial` test re-runs within the
@@ -280,7 +285,7 @@ deleting it causes all `cacheable` tests to run on the next invocation.
 
 ## Test scenarios
 
-The bundled test suite (`test/Main.hs`) contains 35 tests across 6 modules,
+The bundled test suite (`test/Main.hs`) contains 45 tests across 7 modules,
 demonstrating the range of dependency patterns the cache handles:
 
 | Module | `cacheable`? | What it demonstrates |
@@ -291,21 +296,31 @@ demonstrating the range of dependency patterns the cache handles:
 | `Diamond` | yes | Diamond deps — `combined → partA/partB → base`; editing `base` invalidates all four |
 | `Arithmetic` | no | Always runs; Template Haskell — splice dependency tracking |
 | `CPPDemo` | no | Always runs; CPP `#define` changes caught via whole-file hashing |
+| `FalseNegatives` | no | Demonstrates false-negative scenarios in the caching logic (see below) |
 
 ## Known limitations
 
 ### False negatives (tests skip when they should run)
 
-**Missing fingerprint treated as cached.** If a test's name cannot be located
-in the HIE source (dynamically constructed names, unusual formatting), its
-fingerprint is absent. Since an absent fingerprint compares equal to an absent
-cache entry, the test is treated as cached and never runs.
+The `FalseNegatives` test module (`test/FalseNegatives.hs`) contains unit tests
+that demonstrate each of the scenarios below. Run `cabal test` to see them.
+
+**~~Missing fingerprint treated as cached~~ (fixed).** Previously, if a test's
+name could not be located in the HIE source (dynamically constructed names,
+unusual formatting, or `leafMap` collision — see below), its fingerprint was
+absent. Since an absent fingerprint compared equal to an absent cache entry
+(`Nothing /= Nothing` is `False`), the test was treated as cached and never ran
+— not even on the very first invocation. This has been fixed: tests with no
+computable fingerprint are now always treated as stale and run unconditionally.
 
 **`findExprEnd` stops at blank lines.** The indentation heuristic that
 determines where a `testCase` expression ends treats a blank line as a
 terminator. A multi-line `do`-block test with an internal blank line will have
 its body hash computed only up to that blank line; edits after it are invisible
-to the cache.
+to the cache. This also affects dependency tracking in library functions: if a
+function definition contains a blank line, identifiers used after it may not be
+followed by the BFS, so changes to those transitive dependencies can go
+undetected.
 
 **Top-level helpers in the test module are not tracked.** The entire test
 module is excluded from the BFS to avoid including test bodies as their own
@@ -345,8 +360,10 @@ true in GHC 9.8 but is an implementation detail with no documented guarantee.
 ### Architecture
 
 **Duplicate test names.** Two tests in different groups with the same leaf
-name collide in `leafMap`; only one fingerprint is computed. The other test
-falls into the "missing fingerprint" case and is silently cached forever.
+name collide in `leafMap`; only one fingerprint is computed. Since the
+staleness fix, the other test now runs unconditionally on every invocation
+(rather than being silently cached forever), but it never benefits from
+caching.
 
 **String-search test location.** A test's source position is found by
 searching for its quoted name in `hie_hs_src`. A test named `"error"` matches
@@ -434,7 +451,15 @@ it, in order:
 20. *Can you add a command-line option that will disable caching entirely, for
     every test, whether or not it is labelled with `cacheable`?*
 
-21. *Please don't require me to set "--no-hie-cache=True"; just make the flag
-    called "--disable-tasty-cache"*
+21. *Please don't require me to set `--no-hie-cache=True`; just make the flag
+    called `--disable-tasty-cache`*
 
 22. *Can you document this option in the README?*
+
+23. *Can you perform a careful review of the code? Take the perspective of a
+    Haskeller who is concerned that this might result in false-negatives; i.e.
+    not running a test that needs to be re-run. Take some time to convince
+    yourself that this can never happened; or, add some tests to show when and
+    how it _does_ happen.*
+
+24. *Plan looks good; please just also update the README once you're done.*
