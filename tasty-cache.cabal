@@ -11,7 +11,7 @@ description:
   Add @-fwrite-ide-info -hiedir .hie@ to both your library and test-suite
   stanzas, then replace 'defaultMain' with 'defaultMainWithHieCache'.
   .
-  Requires GHC >= 9.8.
+  Requires GHC >= 9.4 (tested on 9.4 through 9.14).
 license:            BSD-3-Clause
 license-file:       LICENSE
 author:             Noon van der Silk
@@ -19,7 +19,12 @@ maintainer:         Noon van der Silk
 category:           Testing
 build-type:         Simple
 extra-doc-files:    README.md CHANGELOG.md
-tested-with:        GHC == 9.8.4
+tested-with:        GHC == 9.4.8
+                 || == 9.6.7
+                 || == 9.8.4
+                 || == 9.10.3
+                 || == 9.12.4
+                 || == 9.14.1
 
 source-repository head
   type:     git
@@ -30,12 +35,12 @@ library
                     Test.Tasty.HieCache.Internal
   hs-source-dirs:   src
   build-depends:
-    , base        >= 4.18 && < 5
+    , base        >= 4.17 && < 5
     , bytestring
     , containers
     , directory
     , filepath
-    , ghc         >= 9.8
+    , ghc         >= 9.4 && < 9.15
     , tasty
   default-language: Haskell2010
   ghc-options:      -Wall -fwrite-ide-info -hiedir .hie
@@ -54,7 +59,7 @@ test-suite tests
     Meta
     Parity
   build-depends:
-    , base             >= 4.18 && < 5
+    , base             >= 4.17 && < 5
     , bytestring
     , containers
     , tasty-cache

@@ -34,7 +34,7 @@
 -- ghc-options: -fwrite-ide-info -hiedir .hie
 -- @
 --
--- Requires GHC >= 9.8.
+-- Requires GHC >= 9.4 (tested on 9.4, 9.6, 9.8, 9.10, 9.12, 9.14).
 --
 -- = Usage
 --

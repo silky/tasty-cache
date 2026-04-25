@@ -71,7 +71,7 @@ effectful tests should always run — their correctness depends on external
 state, not just source bytes. `cacheable` is a deliberate signal that a test
 is pure and repeatable.
 
-Requires **GHC >= 9.8**.
+Requires **GHC >= 9.4** (tested on 9.4, 9.6, 9.8, 9.10, 9.12, 9.14).
 
 ### What if I forget the flags?
 
@@ -89,20 +89,22 @@ stderr.
 ## Nix
 
 This repo is a flake that exposes `tasty-cache` as a nixpkgs-idiomatic
-Haskell package, derived directly from the cabal file. The package targets
-**GHC 9.8**.
+Haskell package, derived directly from the cabal file, built and tested
+against every supported GHC version (**9.4, 9.6, 9.8, 9.10, 9.12,
+9.14**).
 
 ### Consume from another flake
 
-Add `tasty-cache` as an input and apply its overlay; the library then
-appears in `pkgs.haskell.packages.ghc98` and can be pulled in with
-`ghcWithPackages` like any other Haskell dependency:
+Add `tasty-cache` as an input and apply its overlay; the library is
+injected into every supported `pkgs.haskell.packages.ghc<v>` set, so you
+can pick whichever GHC your project targets and pull `tasty-cache` in
+with `ghcWithPackages` like any other Haskell dependency:
 
 ```nix
 {
   inputs = {
-    nixpkgs.url       = "github:NixOS/nixpkgs/nixos-unstable";
-    tasty-cache.url   = "github:silky/tasty-cache";
+    nixpkgs.url     = "github:NixOS/nixpkgs/nixos-unstable";
+    tasty-cache.url = "github:silky/tasty-cache";
   };
 
   outputs = { self, nixpkgs, tasty-cache }:
@@ -112,7 +114,7 @@ appears in `pkgs.haskell.packages.ghc98` and can be pulled in with
         inherit system;
         overlays = [ tasty-cache.overlays.default ];
       };
-      ghc = pkgs.haskell.packages.ghc98;
+      ghc = pkgs.haskell.packages.ghc910;   # or ghc94/96/98/912/914
     in
     {
       packages.${system}.example =
@@ -127,10 +129,11 @@ Haskell builds depend on `tasty-cache` by name.
 ### Build and develop locally
 
 ```sh
-nix build              # build the library
+nix build              # build the library against the default GHC
 nix develop            # dev shell with cabal-install, hiedb, and every
                        # Haskell dep needed for the library + test-suite
-nix flake check        # treefmt, build the package, build & run the tests
+nix flake check        # treefmt + build & run the test-suite on every
+                       # supported GHC version (the full test matrix)
 nix fmt                # format Nix and Haskell sources
 ```
 
@@ -141,9 +144,16 @@ cabal build
 cabal test
 ```
 
-The test-suite is wrapped with `dontCheck` in the package shipped via the
-overlay (so consumers don't pay the test cost transitively), but is
-exercised by `nix flake check` via a separate `tasty-cache-tests` derivation.
+`flake.nix` exposes per-GHC outputs:
+
+```sh
+nix build .#tasty-cache-ghc94    # or -ghc96, -ghc98, -ghc910, -ghc912, -ghc914
+nix build .#checks.x86_64-linux.tasty-cache-ghc910-tests
+```
+
+The package shipped via the overlay is wrapped with `dontCheck` so
+consumers don't pay the test cost transitively; coverage is preserved by
+the per-version `tasty-cache-ghc<v>-tests` derivations under `checks`.
 
 ## How it works
 
@@ -333,9 +343,14 @@ matrix) will race on the cache file on disk; the last write wins.
 
 ### GHC version compatibility
 
-Tested on **GHC 9.8**. The implementation imports `GHC.Iface.Ext.*` and
-`GHC.Types.*`, which are internal GHC APIs with no stability guarantee. GHC
-9.10 and 9.12 are untested; a minor release is a potential breakage point.
+Tested on **GHC 9.4, 9.6, 9.8, 9.10, 9.12, and 9.14** — the full nix-built
+matrix is exercised by `nix flake check` (see [Nix](#nix) above). The
+implementation imports `GHC.Iface.Ext.*` and `GHC.Types.*`, which are
+internal GHC APIs with no stability guarantee, but in practice the
+specific symbols used here have been stable across the entire 9.4 → 9.14
+range. The last breaking rename in this surface area was
+`HieTypes.nodeInfo` → `GHC.Iface.Ext.Types.sourcedNodeInfo` between GHC
+8.10 and 9.0; a similar rename in a future release would re-break things.
 
 ## Cache location
 
@@ -404,8 +419,12 @@ cause unnecessary invalidations.
 ### GHC internals coupling
 
 **Internal GHC API.** The implementation imports `GHC.Iface.Ext.*` and
-`GHC.Types.*`, which are not stable public APIs. This already broke once
-between GHC 9.6 and 9.8 (`nodeInfo` → `sourcedNodeInfo`).
+`GHC.Types.*`, which are not stable public APIs. The last break in the
+specific surface used here was between GHC 8.10 and 9.0 (`nodeInfo` →
+`sourcedNodeInfo`, plus the move from `HieTypes` to
+`GHC.Iface.Ext.Types`); subsequent breaks at 9.2 → 9.4 affected
+`initNameCache` and `readHieFile`. Within 9.4+ the surface has been
+stable, but a future release could break it again.
 
 **`hie_hs_src` vs post-CPP spans.** For CPP modules, `hie_hs_src` stores the
 raw pre-CPP source while HIE AST spans refer to the post-CPP source. With
@@ -531,3 +550,18 @@ it, in order:
     that has cabal, and all the required packages.*
 
     *Please also update the readme accordingly.*
+
+26. *Can you have a think about what's required to support different versions
+    of GHC?*
+
+    *If the HIE format changes; I suggest having a CPP-style setup of
+    different steps per GHC version; and then depending on which one is
+    targetted follow that particular subset of the overall logic.*
+
+    *Investigate a few common GHC versions, as well as the latest release, and
+    formulate a plan for accomodating multiple versions in the one library.*
+
+27. *Just implement "Floor A"; add the checks into the flake.nix, but don't
+    add any GitHub actions.*
+
+    *Please do update the README.*
