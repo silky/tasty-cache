@@ -12,8 +12,8 @@ module Test.Tasty.HieCache.Internal
   , pathKey
   ) where
 
-import qualified Data.ByteString       as BS
-import           Data.List             (intercalate)
+import qualified Data.ByteString as BS
+import           Data.List       (intercalate)
 
 -- ---------------------------------------------------------------------------
 -- Source navigation

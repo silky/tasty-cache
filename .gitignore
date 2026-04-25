@@ -3,3 +3,4 @@ dist-newstyle
 .cache
 .hie
 *.png
+result

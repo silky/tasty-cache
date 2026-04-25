@@ -59,50 +59,52 @@ module Test.Tasty.HieCache
   , cacheable
   ) where
 
-import           Control.Exception         (SomeException, catch, evaluate, try)
-import           Control.Monad             (when)
-import qualified Data.ByteString           as BS
-import qualified Data.ByteString.Char8     as BSC
-import           Data.ByteString.Unsafe    (unsafeUseAsCStringLen)
-import           Data.IORef                (IORef, modifyIORef', newIORef,
-                                            readIORef)
-import           Data.List                 (sort)
-import           Data.Map.Strict           (Map)
-import qualified Data.Map.Strict           as Map
-import           Data.Maybe                (listToMaybe)
-import           Data.Proxy                (Proxy (..))
-import           Data.Set                  (Set)
-import qualified Data.Set                  as Set
-import           Data.Typeable             (Typeable)
-import           Data.Word                 (Word64)
-import           Foreign.Ptr               (castPtr)
-import           GHC.Fingerprint           (Fingerprint (..), fingerprintData,
-                                            fingerprintFingerprints)
-import           System.Directory          (createDirectoryIfMissing,
-                                            doesDirectoryExist, doesFileExist,
-                                            listDirectory)
-import           System.FilePath           (takeExtension, (</>))
-import           System.IO                 (hPutStrLn, stderr)
-import           System.IO.Unsafe          (unsafePerformIO)
+import           Control.Exception            (SomeException, catch, evaluate,
+                                               try)
+import           Control.Monad                (when)
+import qualified Data.ByteString              as BS
+import qualified Data.ByteString.Char8        as BSC
+import           Data.ByteString.Unsafe       (unsafeUseAsCStringLen)
+import           Data.IORef                   (IORef, modifyIORef', newIORef,
+                                               readIORef)
+import           Data.List                    (sort)
+import           Data.Map.Strict              (Map)
+import qualified Data.Map.Strict              as Map
+import           Data.Maybe                   (listToMaybe)
+import           Data.Proxy                   (Proxy (..))
+import           Data.Set                     (Set)
+import qualified Data.Set                     as Set
+import           Data.Typeable                (Typeable)
+import           Data.Word                    (Word64)
+import           Foreign.Ptr                  (castPtr)
+import           GHC.Fingerprint              (Fingerprint (..),
+                                               fingerprintData,
+                                               fingerprintFingerprints)
+import           System.Directory             (createDirectoryIfMissing,
+                                               doesDirectoryExist,
+                                               doesFileExist, listDirectory)
+import           System.FilePath              (takeExtension, (</>))
+import           System.IO                    (hPutStrLn, stderr)
+import           System.IO.Unsafe             (unsafePerformIO)
 
 import           Test.Tasty
 import           Test.Tasty.HieCache.Internal (countIndent, findExprEnd,
                                                findLineStart, findSubstring,
                                                lineStartOffset, pathKey)
-import           Test.Tasty.Options        (IsOption (..),
-                                            OptionDescription (..), OptionSet,
-                                            lookupOption, mkFlagCLParser,
-                                            safeRead)
-import           Test.Tasty.Providers      (IsTest (..), testPassed)
+import           Test.Tasty.Options           (IsOption (..),
+                                               OptionDescription (..),
+                                               OptionSet, lookupOption,
+                                               mkFlagCLParser, safeRead)
+import           Test.Tasty.Providers         (IsTest (..), testPassed)
 import           Test.Tasty.Runners
 
-import qualified GHC.Iface.Ext.Binary      as HIE
-import qualified GHC.Iface.Ext.Types       as HIE
-import           GHC.Types.Name            (nameOccName)
-import           GHC.Types.Name.Cache      (NameCache, initNameCache)
-import           GHC.Types.Name.Occurrence (occNameString)
-import           GHC.Types.SrcLoc          (RealSrcSpan, srcSpanEndLine,
-                                            srcSpanStartLine)
+import qualified GHC.Iface.Ext.Binary         as HIE
+import qualified GHC.Iface.Ext.Types          as HIE
+import           GHC.Types.Name               (nameOccName)
+import           GHC.Types.Name.Cache         (NameCache, initNameCache)
+import           GHC.Types.Name.Occurrence    (occNameString)
+import           GHC.Types.SrcLoc             (RealSrcSpan, srcSpanEndLine,
+                                               srcSpanStartLine)
 
 -- ---------------------------------------------------------------------------
 -- Public API

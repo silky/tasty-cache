@@ -86,6 +86,65 @@ If fingerprinting fails for any other reason (unreadable HIE file, parse
 error), the ingredient falls back to running all tests and logs the error to
 stderr.
 
+## Nix
+
+This repo is a flake that exposes `tasty-cache` as a nixpkgs-idiomatic
+Haskell package, derived directly from the cabal file. The package targets
+**GHC 9.8**.
+
+### Consume from another flake
+
+Add `tasty-cache` as an input and apply its overlay; the library then
+appears in `pkgs.haskell.packages.ghc98` and can be pulled in with
+`ghcWithPackages` like any other Haskell dependency:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url       = "github:NixOS/nixpkgs/nixos-unstable";
+    tasty-cache.url   = "github:silky/tasty-cache";
+  };
+
+  outputs = { self, nixpkgs, tasty-cache }:
+    let
+      system = "x86_64-linux";
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [ tasty-cache.overlays.default ];
+      };
+      ghc = pkgs.haskell.packages.ghc98;
+    in
+    {
+      packages.${system}.example =
+        ghc.ghcWithPackages (p: [ p.tasty-cache ]);
+    };
+}
+```
+
+The same overlay also lets your own `callCabal2nix` / `callPackage`-based
+Haskell builds depend on `tasty-cache` by name.
+
+### Build and develop locally
+
+```sh
+nix build              # build the library
+nix develop            # dev shell with cabal-install, hiedb, and every
+                       # Haskell dep needed for the library + test-suite
+nix flake check        # treefmt, build the package, build & run the tests
+nix fmt                # format Nix and Haskell sources
+```
+
+Inside `nix develop`:
+
+```sh
+cabal build
+cabal test
+```
+
+The test-suite is wrapped with `dontCheck` in the package shipped via the
+overlay (so consumers don't pay the test cost transitively), but is
+exercised by `nix flake check` via a separate `tasty-cache-tests` derivation.
+
 ## How it works
 
 GHC can emit **HIE (Haskell Interface Extended) files** — binary files
@@ -463,3 +522,12 @@ it, in order:
     how it _does_ happen.*
 
 24. *Plan looks good; please just also update the README once you're done.*
+
+25. *Can you reorganise the flake.nix so that it builds a nixpkgs-idiomatic
+    Haskell package from the cabal file? I should be possible to exclude it in
+    a nix project as a typical ghc.withPackages ... dependency.*
+
+    *Please also keep the ability to develop the package inside a nix shell
+    that has cabal, and all the required packages.*
+
+    *Please also update the readme accordingly.*

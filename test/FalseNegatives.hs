@@ -5,13 +5,13 @@
 -- which this can happen.
 module FalseNegatives (falseNegativeTests) where
 
-import qualified Data.ByteString.Char8         as BSC
-import qualified Data.Map.Strict               as Map
+import qualified Data.ByteString.Char8        as BSC
+import qualified Data.Map.Strict              as Map
 import           Test.Tasty
 import           Test.Tasty.HUnit
 
-import           Test.Tasty.HieCache.Internal  (countIndent, findExprEnd,
-                                                pathKey)
+import           Test.Tasty.HieCache.Internal (countIndent, findExprEnd,
+                                               pathKey)
 
 falseNegativeTests :: TestTree
 falseNegativeTests = testGroup "False-negative scenarios"
