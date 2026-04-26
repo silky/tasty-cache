@@ -2,7 +2,7 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 alias c := check
 alias t := test
-alias l := lint
+alias b := build
 
 [private]
 default:
@@ -22,7 +22,7 @@ test:
   cabal test
 
 # build with -Werror and strict linting flags.
-lint:
+build:
   cabal build \
     --ghc-options="-Werror \
       -Wall \
@@ -37,13 +37,13 @@ lint:
 version := `awk '/^version:/ {print $2}' tasty-cache.cabal`
 
 # publish to hackage
-publish:
+publish: build
   cabal check
 
-  nix build #hackage
+  cabal haddock --haddock-for-hackage --enable-doc
 
-  cabal upload --publish \
-    result/tasty-cache-{{version}}.tar.gz
+  cabal upload --publish -t ${HACKAGE_TOKEN} \
+    dist-newstyle/sdist/tasty-cache-{{version}}.tar.gz
 
-  cabal upload --publish \
-    --documentation result/tasty-cache-{{version}}-docs.tar.gz
+  cabal upload --publish -t ${HACKAGE_TOKEN} \
+    --documentation dist-newstyle/tasty-cache-{{version}}-docs.tar.gz
