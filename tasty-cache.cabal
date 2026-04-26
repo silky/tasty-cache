@@ -12,10 +12,13 @@ description:
   stanzas, then replace 'defaultMain' with 'defaultMainWithHieCache'.
   .
   Requires GHC >= 9.4 (tested on 9.4 through 9.14).
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
+copyright:          (c) 2026 Noon van der Silk
 author:             Noon van der Silk
-maintainer:         Noon van der Silk
+maintainer:         Noon van der Silk <noonsilk@gmail.com>
+homepage:           https://github.com/silky/tasty-cache
+bug-reports:        https://github.com/silky/tasty-cache/issues
 category:           Testing
 build-type:         Simple
 extra-doc-files:    README.md CHANGELOG.md
@@ -36,13 +39,15 @@ library
   hs-source-dirs:   src
   build-depends:
     , base        >= 4.17 && < 5
-    , bytestring
-    , containers
-    , directory
-    , filepath
+    , bytestring  < 0.13
+    , containers  < 0.9
+    , directory   < 1.4
+    , filepath    < 1.6
     , ghc         >= 9.4 && < 9.15
-    , tasty
+    , tasty       < 1.6
   default-language: Haskell2010
+  default-extensions:
+    DerivingStrategies
   ghc-options:      -Wall -fwrite-ide-info -hiedir .hie
 
 test-suite tests
@@ -67,4 +72,6 @@ test-suite tests
     , tasty-hunit
     , template-haskell
   default-language: Haskell2010
+  default-extensions:
+    DerivingStrategies
   ghc-options:      -Wall -fwrite-ide-info -hiedir .hie

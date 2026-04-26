@@ -565,3 +565,11 @@ it, in order:
     add any GitHub actions.*
 
     *Please do update the README.*
+
+28. *We're going to upload this package to hackage.*
+
+    *Can you please write a nix build step to prepare a package to upload to
+    Hackage?*
+
+    *Can you make sure the documentation on the code is compatiable with
+    hackage-style documentation?*

@@ -12,3 +12,4 @@ Initial release.
 - Pragma-line hashing for language extension changes
 - Cabal file hashing so `default-extensions` changes invalidate the cache
 - `OK (cached)` output for skipped tests
+- Disable with `cabal test --test-options="--disable-tasty-cache"`

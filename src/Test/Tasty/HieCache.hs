@@ -2,54 +2,61 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections       #-}
 
--- | A Tasty 'Ingredient' that skips tests whose source has not changed since
--- the last passing run, using GHC HIE files for fine-grained dependency
--- tracking.
---
--- Caching is __opt-in__: only tests wrapped with 'cacheable' are ever skipped.
--- Unwrapped tests run unconditionally on every invocation.
---
--- = How it works
---
--- Each 'cacheable' test is assigned a fingerprint:
---
--- @
--- fingerprint = hash(body_hash, dep_hash, cabal_hash)
--- body_hash   = hash of the testCase expression's source bytes
--- dep_hash    = hash of the source bytes of every declaration transitively
---               reachable from the test body via the HIE identifier graph
--- cabal_hash  = hash of all .cabal files in the project root
--- @
---
--- On each run fingerprints are compared against a cache
--- (@.cache\/hie-tasty-cache@).  Tests with matching fingerprints are
--- replaced with an instant-pass placeholder; only stale tests execute.
--- The cache is updated per-test as each passing test completes.
---
--- = Requirements
---
--- Both the library and test-suite stanzas must emit HIE files:
---
--- @
--- ghc-options: -fwrite-ide-info -hiedir .hie
--- @
---
--- Requires GHC >= 9.4 (tested on 9.4, 9.6, 9.8, 9.10, 9.12, 9.14).
---
--- = Usage
---
--- @
--- import Test.Tasty.HieCache (defaultMainWithHieCache, cacheable)
---
--- main :: IO ()
--- main = defaultMainWithHieCache tests
---
--- tests :: TestTree
--- tests = testGroup "all"
---   [ cacheable $ testGroup "pure" [...]   -- skipped when unchanged
---   , testGroup "integration" [...]        -- always runs
---   ]
--- @
+{-|
+Module      : Test.Tasty.HieCache
+Description : Tasty ingredient that skips unchanged tests using GHC HIE files
+Stability   : experimental
+Portability : non-portable (requires GHC >= 9.4 and HIE files)
+
+A Tasty 'Ingredient' that skips tests whose source has not changed since
+the last passing run, using GHC HIE files for fine-grained dependency
+tracking.
+
+Caching is __opt-in__: only tests wrapped with 'cacheable' are ever skipped.
+Unwrapped tests run unconditionally on every invocation.
+
+= How it works
+
+Each 'cacheable' test is assigned a fingerprint:
+
+@
+fingerprint = hash(body_hash, dep_hash, cabal_hash)
+body_hash   = hash of the testCase expression's source bytes
+dep_hash    = hash of the source bytes of every declaration transitively
+              reachable from the test body via the HIE identifier graph
+cabal_hash  = hash of all .cabal files in the project root
+@
+
+On each run fingerprints are compared against a cache
+(@.cache\/hie-tasty-cache@).  Tests with matching fingerprints are
+replaced with an instant-pass placeholder; only stale tests execute.
+The cache is updated per-test as each passing test completes.
+
+= Requirements
+
+Both the library and test-suite stanzas must emit HIE files:
+
+@
+ghc-options: -fwrite-ide-info -hiedir .hie
+@
+
+Requires GHC >= 9.4 (tested on 9.4, 9.6, 9.8, 9.10, 9.12, 9.14).
+
+= Usage
+
+@
+import Test.Tasty.HieCache (defaultMainWithHieCache, cacheable)
+
+main :: IO ()
+main = defaultMainWithHieCache tests
+
+tests :: TestTree
+tests = testGroup \"all\"
+  [ cacheable $ testGroup \"pure\" [...]   -- skipped when unchanged
+  , testGroup \"integration\" [...]        -- always runs
+  ]
+@
+-}
 module Test.Tasty.HieCache
   ( -- * Main entry point
     defaultMainWithHieCache
@@ -300,8 +307,8 @@ readHieData nc path = do
 -- ---------------------------------------------------------------------------
 -- Fingerprinting
 
--- | Per-declaration info: the source bytes for each clause/equation, plus the
--- set of Haskell names that appear as 'Use' within the declaration's body.
+-- Per-declaration info: the source bytes for each clause/equation, plus the
+-- set of Haskell names that appear as @Use@ within the declaration's body.
 -- Used during the transitive-dep BFS.
 data DeclData = DeclData
   { ddChunks    :: [[BS.ByteString]]  -- source bytes, one inner list per clause
@@ -449,7 +456,7 @@ transitiveDeps declMaps fileSrcs testFile startNames =
 -- ---------------------------------------------------------------------------
 -- HIE AST analysis
 
--- | Build a map from occName to 'DeclData' for every top-level binding in
+-- Build a map from occName to @DeclData@ for every top-level binding in
 -- the AST.  Each equation/clause contributes one entry; entries for the same
 -- name are merged (source chunks concatenated, used-name sets unioned).
 buildDeclMap :: HieData -> Map String DeclData
