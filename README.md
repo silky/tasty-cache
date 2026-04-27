@@ -8,6 +8,9 @@
 
 # tasty-cache
 
+[![Hackage](https://img.shields.io/hackage/v/tasty-cache.svg?logo=haskell&label=Hackage)](https://
+ hackage.haskell.org/package/tasty-cache)
+
 A [Tasty](https://hackage.haskell.org/package/tasty) ingredient that skips
 tests whose source hasn't changed since the last passing run, using GHC HIE
 files for fine-grained dependency tracking.
