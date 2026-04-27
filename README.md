@@ -1,7 +1,7 @@
 
 > [!Note]
-> Note: This project was built almost entirely with AI; see
-> [How this was built](#how-this-was-built) for the prompts.
+> This project was built almost entirely with AI; see [How this was
+> built](#how-this-was-built) for the prompts.
 >
 > A human did, however, read over the readme and find it acceptable.
 
