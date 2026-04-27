@@ -8,6 +8,8 @@
 
 # tasty-cache
 
+![Demo of the functionality](./demo.gif)
+
 [![Hackage](https://img.shields.io/hackage/v/tasty-cache.svg?logo=haskell&label=Hackage)](https://hackage.haskell.org/package/tasty-cache)
 
 A [Tasty](https://hackage.haskell.org/package/tasty) ingredient that skips
