@@ -495,6 +495,8 @@ it, in order:
 
 9. *Can you think of a nice name for this project?*
 
+    (Human's note: All the names it came up with were terrible.)
+
 10. *Can you rename this project to tasty-cache.*
 
 11. *Can you update the README now to reflect the current output and state of
