@@ -363,14 +363,15 @@ deleting it causes all `cacheable` tests to run on the next invocation.
 
 ## Test scenarios
 
-The bundled test suite (`test/Main.hs`) contains 45 tests across 7 modules,
-demonstrating the range of dependency patterns the cache handles:
+The bundled test suite (`test/Main.hs`) demonstrates the range of dependency
+patterns the cache handles:
 
 | Module | `cacheable`? | What it demonstrates |
 |---|---|---|
 | `Lib` | yes | Basic direct dep — editing `factorial` doesn't invalidate `add` tests |
 | `Parity` | no | Always runs; mutual recursion — `isEven`/`isOdd` call each other |
 | `Expr` | yes | GADT — `eval` and `pretty` are independent; editing one doesn't invalidate the other |
+| `Polymorphic` (+ `Instances`) | yes | Polymorphic helper used at a `Foo` whose `Num` instance lives in another module — demonstrates the [instance-resolution false negative](#instance-resolution--overloaded-identifiers) |
 | `Diamond` | yes | Diamond deps — `combined → partA/partB → base`; editing `base` invalidates all four |
 | `Arithmetic` | no | Always runs; Template Haskell — splice dependency tracking |
 | `CPPDemo` | no | Always runs; CPP `#define` changes caught via whole-file hashing |
@@ -408,6 +409,73 @@ not invalidate those tests.
 **Multi-line pragmas only partially captured.** The pragma-line detector
 matches lines beginning with `{-#`. A pragma written across multiple lines has
 its continuation lines omitted from the hash.
+
+#### Instance resolution / overloaded identifiers
+
+The dependency BFS matches identifiers by *occurrence name* (a bare string
+like `"*"` or `"factorial"`).  This works by accident for most class methods
+— a polymorphic helper that uses `(*)` textually contains `"*"`, so the BFS
+visits *every* binding named `*` in *every* file, the relevant instance
+method included.  But methods invoked **only through type-class
+resolution**, with no textual mention on any BFS-reachable path, are
+invisible to the cache.
+
+The cleanest example is overloaded numeric literals.  Consider:
+
+```haskell
+-- Polymorphic.hs
+poly :: Num a => a -> a
+poly x = x * x + 1   -- the `1` is `fromInteger 1 :: a`
+
+-- Instances.hs (in a separate module the test never names directly)
+instance Num Foo where
+  Foo a + Foo b = Foo (a + b)
+  Foo a * Foo b = Foo (a * b)
+  fromInteger n = Foo (fromInteger n)
+  -- ...
+```
+
+The test `poly (Foo 3) @?= Foo 10` invokes `(*)`, `(+)`, **and**
+`fromInteger` on `Foo` at the call site, but the string `"fromInteger"`
+appears nowhere in `poly`'s body.  Editing the `fromInteger` clause of
+`instance Num Foo` (e.g. to `Foo (fromInteger n + 100)`, which would change
+the result to `Foo 110`) leaves every BFS-reachable name unchanged, so the
+fingerprint does not change and the test is wrongly served from cache.
+
+The same hole applies to `fromString` (with `OverloadedStrings`),
+`fromList` (`OverloadedLists`), default class-method bodies that an
+instance silently overrides, and any other dispatch driven by
+type-inference rather than identifier names.
+
+**Detection.** HIE files do contain enough information to fix this in
+principle: every identifier occurrence carries `identType :: Maybe
+TypeIndex`, and dictionary application sites are tagged with
+`HIE.EvidenceVarUse` (with the corresponding instance binding tagged as
+`HIE.EvidenceVarBind (EvInstBind …)`).  A principled BFS would follow
+those evidence edges in addition to occurrence-name edges.  Doing so
+properly requires reconstructing instance heads from `HieTypeFlat` to
+match uses to bindings across files, which is a meaningful piece of work
+and not yet implemented.
+
+As a stopgap, `tasty-cache` *detects* the scenario and emits a single
+warning line on stderr:
+
+```
+HieCache: 21 of 21 cacheable test(s) use overloaded identifiers; edits to
+their instance bodies may not invalidate the cache. See README "Instance
+resolution".
+```
+
+In practice this fires for almost every HUnit-style test, because `(@?=)`
+itself uses `Eq` and `Show` resolved via type-class dispatch — most tests
+*are* susceptible to this false negative for some instance edit, even if
+not for any edit you make in the normal course of developing the code
+under test.
+
+A pure-Haskell unit test of the underlying mechanism lives in
+`test/FalseNegatives.hs`'s `Instance resolution staleness` group, and an
+end-to-end demonstration is the `Polymorphic` test group together with
+`test/Instances.hs`.
 
 ### False positives (tests run when they don't need to)
 

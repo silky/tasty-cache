@@ -7,6 +7,8 @@ module FalseNegatives (falseNegativeTests) where
 
 import qualified Data.ByteString.Char8        as BSC
 import qualified Data.Map.Strict              as Map
+import           Data.Set                     (Set)
+import qualified Data.Set                     as Set
 import           Test.Tasty
 import           Test.Tasty.HUnit
 
@@ -18,6 +20,7 @@ falseNegativeTests = testGroup "False-negative scenarios"
   [ stalenessTests
   , leafMapTests
   , findExprEndTests
+  , instanceResolutionTests
   ]
 
 -- ---------------------------------------------------------------------------
@@ -190,3 +193,102 @@ findExprEndTests = testGroup "findExprEnd blank-line truncation"
       assertBool "dep2 after blank line is NOT included in body"
         (not $ BSC.isInfixOf (BSC.pack "dep2") bodyBytes)
   ]
+
+-- ---------------------------------------------------------------------------
+-- 4. Instance resolution / overloaded identifiers
+--
+-- The dependency BFS matches identifiers by *occurrence name* (a bare
+-- string).  This means an instance method @m@ is followed only if some
+-- declaration on the BFS path textually mentions the name @m@.
+--
+-- For most class methods this works by accident: a polymorphic helper that
+-- uses @m@ at all will textually contain the string @"m"@, and the BFS will
+-- visit every binding named @m@ in every file — including the relevant
+-- instance method.  (This is the source of the documented `occName`
+-- collision false positive.)
+--
+-- The blind spot is methods invoked *implicitly* through type-class
+-- resolution rather than by name in source.  The clearest example is
+-- numeric literals: @poly x = x * x + 1@ uses @fromInteger@ at the call
+-- site whenever @poly@ is specialised at a @Num@ instance, but the string
+-- @"fromInteger"@ does not appear in @poly@'s body.  Editing @fromInteger@
+-- in the relevant @Num@ instance can break the test without changing any
+-- name on the BFS path, so the cache wrongly serves the stale result.
+--
+-- The test below models the BFS in pure code and asserts that, given a
+-- test body that names @poly@ and a @poly@ whose used-name set is
+-- @{*, +}@, the reachable name set excludes @fromInteger@ and @negate@ —
+-- so changes to those instance methods are invisible to the cache.
+
+instanceResolutionTests :: TestTree
+instanceResolutionTests = testGroup "Instance resolution staleness"
+  [ testCase "name-only BFS misses instance methods not textually reachable" $ do
+      -- Names directly used in the test body `poly (Foo 3) @?= Foo 10`:
+      let testBodyNames = Set.fromList ["poly", "Foo"]
+
+      -- Decl map: name → set of names used in body (modelling ddUsedNames).
+      -- `poly`'s body is `x * x + 1` — uses `*` and `+`; the `1` is a
+      -- literal with no textual name.
+      let declMap = Map.fromList
+            [ ("poly",        Set.fromList ["*", "+"])
+            -- The instance methods on `Num Foo` are each keyed by their
+            -- occurrence name in `buildDeclMap`:
+            , ("*",           Set.empty)
+            , ("+",           Set.empty)
+            , ("fromInteger", Set.empty)
+            , ("negate",      Set.empty)
+            ]
+
+      let reachable = bfsReachable declMap testBodyNames
+
+      -- `*` and `+` are reached (textually used by `poly`):
+      assertBool "* is reachable"
+        (Set.member "*" reachable)
+      assertBool "+ is reachable"
+        (Set.member "+" reachable)
+      -- But `fromInteger` is NOT reached, even though it is invoked at
+      -- every numeric-literal occurrence in `poly`'s body when specialised
+      -- at `Foo`.  Changes to `instance Num Foo` { `fromInteger` } go
+      -- undetected — false negative.
+      assertBool "fromInteger is NOT reachable (false negative)"
+        (not (Set.member "fromInteger" reachable))
+      -- Same for any instance method whose name does not textually appear
+      -- on a BFS path — `negate`, `abs`, `signum`, ...
+      assertBool "negate is NOT reachable (false negative)"
+        (not (Set.member "negate" reachable))
+
+  , testCase "Polymorphic test body that names a method does follow it" $ do
+      -- Sanity check: when the polymorphic helper *does* mention a method
+      -- name, the BFS does follow it (this is why most cases happen to
+      -- work by accident).  A helper `f x = negate x` keyed at "f", with
+      -- an instance method "negate", is reachable from a test body that
+      -- names "f".
+      let testBodyNames = Set.fromList ["f"]
+          declMap = Map.fromList
+            [ ("f",      Set.fromList ["negate"])
+            , ("negate", Set.empty)
+            , ("abs",    Set.empty)
+            ]
+          reachable = bfsReachable declMap testBodyNames
+      assertBool "negate (textually used by f) is reachable"
+        (Set.member "negate" reachable)
+      -- abs is still not reached: not textually mentioned anywhere.
+      assertBool "abs (not textually used) is still unreachable"
+        (not (Set.member "abs" reachable))
+  ]
+
+-- A pure model of the @transitiveDeps@ BFS: starting from @start@, visit
+-- every name reachable through @declMap@ (name → names used in its body).
+bfsReachable :: Map.Map String (Set String) -> Set String -> Set String
+bfsReachable declMap = go Set.empty
+  where
+    go visited frontier
+      | Set.null frontier = visited
+      | otherwise =
+          let visited'   = Set.union visited frontier
+              nextNames  = Set.unions
+                [ Map.findWithDefault Set.empty n declMap
+                | n <- Set.toList frontier
+                ]
+              frontier'  = Set.difference nextNames visited'
+          in go visited' frontier'

@@ -9,8 +9,10 @@ import           CPPDemo             (cppVersion, scaled)
 import           Diamond             (base, combined, partA, partB)
 import           Expr                (Expr (..), eval, pretty)
 import           FalseNegatives      (falseNegativeTests)
+import           Instances           (Foo (..))
 import           Lib                 (add, factorial)
 import           Parity              (collatz, isEven, isOdd)
+import           Polymorphic         (poly)
 
 main :: IO ()
 main = defaultMainWithHieCache tests
@@ -52,6 +54,15 @@ tests = testGroup "scenarios"
     , testCase "pretty Add"        $ pretty (Add (Lit 1) (Lit 2))                      @?= "(1 + 2)"
     , testCase "pretty nested Add" $ pretty (Add (Lit 1) (Add (Lit 2) (Lit 3)))        @?= "(1 + (2 + 3))"
     , testCase "pretty Eq"         $ pretty (Eq (Lit 1) (Lit 2))                       @?= "(1 == 2)"
+    ]
+
+  -- Wrapped: demonstrates the instance-resolution false negative.
+  -- The test body names `poly` and `Foo`, but the `Num Foo` instance lives
+  -- in `Instances.hs` and is reached only via type-class resolution at the
+  -- call site.  The current name-only BFS does not follow that edge, so
+  -- editing the body of `instance Num Foo` will not invalidate this test.
+  , cacheable $ testGroup "Polymorphic (instance resolution — known false negative)"
+    [ testCase "poly @Foo 3 == Foo 10" $ poly (Foo 3) @?= Foo 10
     ]
 
   -- Wrapped: transitive BFS means editing 'base' invalidates all four.

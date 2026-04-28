@@ -180,10 +180,18 @@ hieCacheIngredient subIngredients = TestManager [Option (Proxy :: Proxy HieCache
         else do
           let paths = collectPaths tree
 
-          fps <- computeFingerprints hieDir paths
+          (fps, warnings) <- computeFingerprints hieDir paths
                    `catch` \(e :: SomeException) -> do
                      hPutStrLn stderr $ "HieCache: fingerprint error: " ++ show e
-                     return Map.empty
+                     return (Map.empty, [])
+
+          when (not (null warnings)) $
+            hPutStrLn stderr $
+              "HieCache: " ++ show (length warnings) ++ " of " ++
+              show (length paths) ++
+              " cacheable test(s) use overloaded identifiers; edits to" ++
+              " their instance bodies may not invalidate the cache." ++
+              " See README \"Instance resolution\"."
 
           cache <- loadCache cachePath
 
@@ -318,7 +326,9 @@ data DeclData = DeclData
 computeFingerprints
   :: FilePath
   -> [TestPath]
-  -> IO (Map String Fingerprint)
+  -> IO (Map String Fingerprint, [String])
+  -- ^ (fingerprints, leaf names of cacheable tests whose bodies use
+  -- overloaded identifiers — see 'hasEvidenceUseInBody').
 computeFingerprints hieDir paths = do
   hieFiles <- sort . filter ((== ".hie") . takeExtension)
                 <$> listDirectory hieDir
@@ -338,11 +348,20 @@ computeFingerprints hieDir paths = do
   let leafMap = Map.fromListWith const
         [ (last p, p) | p <- paths, not (null p) ]
 
-  return $ Map.fromList
-    [ (pathKey path, fp)
-    | (leafName, path) <- Map.toList leafMap
-    , Just fp          <- [computeTestFP allData declMaps fileSrcs cabalHash leafName]
-    ]
+  let results =
+        [ (leafName, path, computeTestFP allData declMaps fileSrcs cabalHash leafName)
+        | (leafName, path) <- Map.toList leafMap
+        ]
+
+  let fps = Map.fromList
+        [ (pathKey path, fp)
+        | (_, path, Just (fp, _)) <- results
+        ]
+      warnings =
+        [ leafName
+        | (leafName, _, Just (_, True)) <- results
+        ]
+  return (fps, warnings)
 
 computeTestFP
   :: [(FilePath, HieData)]
@@ -350,7 +369,14 @@ computeTestFP
   -> Map FilePath BS.ByteString   -- raw source per file (for CPP handling)
   -> Fingerprint                   -- hash of all .cabal files
   -> String
-  -> Maybe Fingerprint
+  -> Maybe (Fingerprint, Bool)
+  -- ^ The 'Bool' is 'True' iff the test body contains an
+  -- 'HIE.EvidenceVarUse' — i.e. a use of an overloaded identifier whose
+  -- instance dictionary is resolved at the call site.  The dependency BFS
+  -- in this implementation follows occurrence names only and does not
+  -- chase evidence variables, so such tests can have false negatives if
+  -- the relevant @instance@ body is edited without changing any name on a
+  -- BFS-reachable path.  See README \"Instance resolution\".
 computeTestFP allData declMaps fileSrcs cabalHash leafName = do
   let quoted = BSC.pack ('"' : leafName ++ "\"")
 
@@ -381,7 +407,10 @@ computeTestFP allData declMaps fileSrcs cabalHash leafName = do
 
   let depHash = unsafePerformIO $ hashBytesList (sort depChunks)
 
-  return (fingerprintFingerprints [bodyHash, depHash, cabalHash])
+  -- Detect (but do not follow) evidence-variable uses in the test body.
+  let hasEvidence = hasEvidenceUseInBody (hdAst testData) startLine endLine
+
+  return (fingerprintFingerprints [bodyHash, depHash, cabalHash], hasEvidence)
 
 -- | BFS over the HIE identifier graph, collecting source bytes for every
 -- declaration reachable from @startNames@ in files other than @testFile@.
@@ -516,6 +545,30 @@ getUsedNames root startLine endLine = go root
       | (Right name, details) <- Map.toList (HIE.nodeIdentifiers ni)
       , HIE.Use `Set.member` HIE.identInfo details
       ]
+
+-- | True iff any identifier within the @startLine..endLine@ span carries
+-- an 'HIE.EvidenceVarUse' context.  This flags test bodies whose result
+-- depends on instance dictionaries resolved at the call site — the
+-- scenario the dependency BFS is known to under-approximate.
+hasEvidenceUseInBody :: HIE.HieAST HIE.TypeIndex -> Int -> Int -> Bool
+hasEvidenceUseInBody root startLine endLine = go root
+  where
+    go node
+      | srcSpanEndLine   (HIE.nodeSpan node) < startLine = False
+      | srcSpanStartLine (HIE.nodeSpan node) > endLine   = False
+      | otherwise =
+          nodeHasEvidenceUse node || any go (HIE.nodeChildren node)
+
+    nodeHasEvidenceUse node = any niHas
+      (Map.elems (HIE.getSourcedNodeInfo (HIE.sourcedNodeInfo node)))
+
+    niHas ni = any detailsHas (Map.elems (HIE.nodeIdentifiers ni))
+
+    detailsHas details = any isEvidenceVarUse
+      (Set.toList (HIE.identInfo details))
+
+    isEvidenceVarUse HIE.EvidenceVarUse = True
+    isEvidenceVarUse _                  = False
 
 -- | Extract the source bytes covering lines @startLine..endLine@ (1-indexed).
 extractSpanLines :: BS.ByteString -> RealSrcSpan -> BS.ByteString

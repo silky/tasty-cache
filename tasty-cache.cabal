@@ -60,9 +60,11 @@ test-suite tests
     Diamond
     Expr
     FalseNegatives
+    Instances
     Lib
     Meta
     Parity
+    Polymorphic
   build-depends:
     , base             >= 4.17 && < 5
     , bytestring
