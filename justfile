@@ -38,6 +38,8 @@ version := `awk '/^version:/ {print $2}' tasty-cache.cabal`
 
 # publish to hackage
 publish: build
+  cabal test --test-options="--disable-tasty-cache"
+
   cabal sdist
 
   cabal check
