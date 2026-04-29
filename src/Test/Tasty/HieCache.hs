@@ -628,10 +628,55 @@ ctxInstClass _ = Nothing
 -- are evidence variables for which class.
 buildFileIndex :: EvBindIndex -> HieData -> (Map String DeclData, ClassIndex)
 buildFileIndex globalEvBinds (HieData src ast) =
-    (Map.fromListWith mergeDeclData (concatMap nodeEntries nodes), classIdx)
+    ( Map.map augmentImplicitDispatch
+        (Map.fromListWith mergeDeclData (concatMap nodeEntries nodes))
+    , classIdx
+    )
   where
     nodes = flatNodes ast
     flatNodes n = n : concatMap flatNodes (HIE.nodeChildren n)
+
+    -- Conservative implicit-dispatch heuristic.  GHC's HIE does not
+    -- record an 'EvidenceVarUse' for the desugaring of certain
+    -- syntactic forms — string literals under @OverloadedStrings@,
+    -- list literals under @OverloadedLists@, or @if-then-else@ /
+    -- @do@ / numeric-literal forms under @RebindableSyntax@ — at
+    -- the binding's span, so 'getUsedClasses' / 'getUsedNames' do
+    -- not surface them.  We compensate by checking the file's
+    -- single-line @{-# LANGUAGE … #-}@ pragmas and conservatively
+    -- adding the corresponding class / name dependencies to every
+    -- binding in the file.  Over-approximates (a binding with no
+    -- string literal still claims @IsString@) but the project's
+    -- philosophy is "false positives over false negatives".
+    fileExts = pragmaExtensions src
+
+    augmentImplicitDispatch dd
+      | Set.null implicitClasses && Set.null implicitNames = dd
+      | otherwise = dd
+          { ddUsedClasses = ddUsedClasses dd `Set.union` implicitClasses
+          , ddUsedNames   = ddUsedNames   dd `Set.union` implicitNames
+          }
+
+    implicitClasses = Set.fromList $
+      [ "IsString" | "OverloadedStrings" `Set.member` fileExts ] ++
+      [ "IsList"   | "OverloadedLists"   `Set.member` fileExts ]
+
+
+    -- Names rebindable by 'RebindableSyntax'.  These are the standard
+    -- desugaring targets the GHC user's guide enumerates (do-notation,
+    -- if-then-else, list/numeric/string literals, arrow notation,
+    -- failure).  When 'RebindableSyntax' is on, GHC resolves them to
+    -- whatever's in scope, but does not record a Use in the body's
+    -- span; we add them here so the name-edge BFS picks up local
+    -- rebindings if they exist.
+    implicitNames
+      | "RebindableSyntax" `Set.member` fileExts = Set.fromList
+          [ "ifThenElse", ">>=", ">>", "return", "fail"
+          , "fromInteger", "fromRational", "fromString", "fromList"
+          , "fromLabel", "negate"
+          , "arr", ">>>", "first"
+          ]
+      | otherwise = Set.empty
 
     nodeEntries node =
       [ (occNameString (nameOccName name),
@@ -658,7 +703,7 @@ buildFileIndex globalEvBinds (HieData src ast) =
     -- and method bodies' local bindings should already be reached via
     -- the regular name-edge BFS).
     classIdx :: ClassIndex
-    classIdx = Map.fromListWith Set.union (concatMap goClass [ast])
+    classIdx = Map.fromListWith Set.union (goClass ast)
       where
         goClass node =
           case nodeImmediateChildClasses node of
@@ -685,9 +730,9 @@ buildFileIndex globalEvBinds (HieData src ast) =
           , Just clsName <- map ctxInstClass (Set.toList (HIE.identInfo details))
           ]
 
-        isBindCtx HIE.MatchBind  = True
+        isBindCtx HIE.MatchBind    = True
         isBindCtx (HIE.ValBind {}) = True
-        isBindCtx _              = False
+        isBindCtx _                = False
 
     mergeDeclData (DeclData c1 u1 cl1) (DeclData c2 u2 cl2) =
       DeclData (c1 ++ c2) (Set.union u1 u2) (Set.union cl1 cl2)
@@ -775,6 +820,26 @@ extractLineRange src startLine endLine =
   let ls        = BSC.split '\n' src
       relevant  = take (endLine - startLine + 1) (drop (startLine - 1) ls)
   in  BSC.unlines relevant
+
+-- | Parse the set of language extensions enabled by single-line
+-- @{-# LANGUAGE … #-}@ pragmas in @src@.  Multi-line pragma blocks
+-- (whose continuation lines do not begin with @{-#@) are not parsed —
+-- this matches the documented limitation of the pragma-line filter
+-- elsewhere.  Used by 'buildFileIndex' to apply the implicit-dispatch
+-- heuristic for @OverloadedStrings@, @OverloadedLists@, and
+-- @RebindableSyntax@.
+pragmaExtensions :: BS.ByteString -> Set String
+pragmaExtensions src = Set.fromList
+  [ token
+  | l <- BSC.lines src
+  , Just rest <- [BSC.stripPrefix (BSC.pack "{-# LANGUAGE") l]
+  , let payload = BSC.takeWhile (/= '#') (BSC.dropWhile (== ' ') rest)
+        tokens  = map (BSC.unpack . BSC.dropWhile (== ' ')
+                                  . BSC.dropWhileEnd (== ' '))
+                      (BSC.split ',' payload)
+  , token <- tokens
+  , not (null token)
+  ]
 
 -- Source navigation utilities live in Test.Tasty.HieCache.Internal
 

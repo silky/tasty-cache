@@ -195,6 +195,20 @@ implicitly-invoked method (e.g. `fromInteger`, `fromString`) on the
 relevant instance is edited — even though the method's name appears
 nowhere in the test body or the polymorphic helper's source.
 
+The BFS is supplemented with an **implicit-dispatch heuristic** for
+extensions whose desugaring GHC does not record as a HIE-level Use
+ident at the binding's span. When a file's single-line
+`{-# LANGUAGE … #-}` pragmas enable `OverloadedStrings`,
+`OverloadedLists`, or `RebindableSyntax`, every binding in that file
+conservatively claims a dependency on the corresponding class
+(`IsString`, `IsList`) or the standard rebound names (`ifThenElse`,
+`>>=`, `fromInteger`, `fromString`, `fromList`, `negate`, …) — so
+edits to a `fromString` body, a `fromList` body, or a local
+`ifThenElse` propagate to every test that reaches a binding in that
+file. This is intentionally over-approximating: a file with
+`OverloadedStrings` enabled but no string literal in a particular
+binding still gets `IsString` added.
+
 The resolution is class-only, not class-and-type, so it is conservative
 (over-approximating). Concretely: editing *any* `Num` instance's body —
 even one specialised at a type the test never uses — invalidates every
@@ -286,7 +300,10 @@ The dep hash covers the **transitive closure** of the HIE identifier graph:
 | Edit `isEven` | `isEven` tests **and** `isOdd` tests (since `isOdd` calls `isEven`) |
 | Edit a TH template body (`adderExpr`) | Tests using that splice (`add5`, `add10`) but not others (`timesBy3`) |
 | Change `#define SCALE_FACTOR` | All tests in that CPP module (whole-file hashed) |
-| Add/remove a `{-# LANGUAGE #-}` pragma | All tests that transitively depend on that module |
+| Add/remove a `{-# LANGUAGE #-}` pragma (single-line) | All tests that transitively depend on that module |
+| Edit `fromString` in an `IsString` instance (under `OverloadedStrings`) | All tests that reach a binding in any file with `OverloadedStrings` enabled |
+| Edit `fromList` in an `IsList` instance (under `OverloadedLists`) | All tests that reach a binding in any file with `OverloadedLists` enabled |
+| Edit a local `ifThenElse` / `>>=` / `fromInteger` (under `RebindableSyntax`) | All tests that reach a binding in any file with `RebindableSyntax` enabled |
 | Edit a `.cabal` file | All `cacheable` tests (cabal hash covers `default-extensions` etc.) |
 | Edit an unrelated function | Nothing — those tests stay cached |
 | Any change to a non-`cacheable` test | That test always runs anyway |
@@ -397,26 +414,41 @@ deleting it causes all `cacheable` tests to run on the next invocation.
 
 ## Test scenarios
 
-The bundled test suite (`test/Main.hs`) demonstrates the range of dependency
-patterns the cache handles:
+The bundled test suite is split into two top-level groups:
 
-| Module | `cacheable`? | What it demonstrates |
+* **`Library` (`test/Library.hs`)** — *genuine* tests of the library
+  itself: source-navigation helper unit tests, cache-key logic
+  (staleness, `leafMap` collisions, BFS model), pragma & cabal-hash
+  byte logic, and end-to-end fingerprint-mutation tests against the
+  real `.hie/` files. The whole tree is wrapped in `cacheable` —
+  the project dogfoods its own cache for its own tests.
+
+* **`Demos` (`test/Demos.hs`)** — a tour of *what the cache supports
+  and where it breaks*. Cacheable demos (Lib / Expr / Polymorphic /
+  Diamond, plus per-extension implicit-dispatch fixtures) print
+  `OK (cached)` on repeat runs; always-run demos (`Parity`,
+  `Arithmetic`, `CPPDemo`, multi-line pragma) showcase patterns the
+  cache deliberately does not cover.
+
+| Demo group | `cacheable`? | What it demonstrates |
 |---|---|---|
-| `Lib` | yes | Basic direct dep — editing `factorial` doesn't invalidate `add` tests |
-| `Parity` | no | Always runs; mutual recursion — `isEven`/`isOdd` call each other |
-| `Expr` | yes | GADT — `eval` and `pretty` are independent; editing one doesn't invalidate the other |
-| `Polymorphic` (+ `Instances`) | yes | Polymorphic helper used at `Foo` whose `Num` instance lives in another module — exercises the class-edge BFS that follows type-class evidence into instance bodies |
-| `Diamond` | yes | Diamond deps — `combined → partA/partB → base`; editing `base` invalidates all four |
-| `Arithmetic` | no | Always runs; Template Haskell — splice dependency tracking |
-| `CPPDemo` | no | Always runs; CPP `#define` changes caught via whole-file hashing |
-| `FalseNegatives` | no | Demonstrates false-negative scenarios in the caching logic (see below) |
+| Direct dependency (`Lib`) | yes | Editing `factorial` doesn't invalidate `add` tests |
+| GADT independence (`Expr`) | yes | `eval` and `pretty` occupy distinct spans; editing one doesn't invalidate the other |
+| Class-edge BFS (`Polymorphic` + `Instances`) | yes | Polymorphic helper used at `Foo` whose `Num` instance lives in another module — class-edge BFS chases evidence into instance bodies |
+| Diamond dependencies (`Diamond`) | yes | `combined → partA/partB → base`; editing `base` invalidates all four |
+| Per-extension implicit dispatch | yes | One fixture each for `OverloadedStrings`, `OverloadedLists`, `OverloadedLabels`, `RebindableSyntax`, `DefaultSignatures`, `DeriveAnyClass`, `DerivingVia`, `GeneralizedNewtypeDeriving`, `StandaloneDeriving`, `PatternSynonyms`, `TypeFamilies`, `DataKinds`, `ImplicitParams` — the matching mutation tests in `Library` exercise each |
+| Mutual recursion (`Parity`) | no | Always-run; `isEven`/`isOdd` call each other |
+| Template Haskell (`Arithmetic`) | no | Always-run; splice-generated bindings aren't tracked through HIE Use edges |
+| CPP (`CPPDemo`) | no | Always-run; `#define` line edits don't relocate to the right declaration span |
+| Multi-line pragma (`MultiLinePragmaFix`) | no | Always-run; demo of the documented multi-line `{-# LANGUAGE … #-}` limitation |
 
 ## Known limitations
 
 ### False negatives (tests skip when they should run)
 
-The `FalseNegatives` test module (`test/FalseNegatives.hs`) contains unit tests
-that demonstrate each of the scenarios below. Run `cabal test` to see them.
+The `Library` test module (`test/Library.hs`) contains the unit tests
+and fingerprint-mutation tests that pin each of the scenarios below.
+Run `cabal test` to see them.
 
 **~~Missing fingerprint treated as cached~~ (fixed).** Previously, if a test's
 name could not be located in the HIE source (dynamically constructed names,
@@ -442,7 +474,21 @@ not invalidate those tests.
 
 **Multi-line pragmas only partially captured.** The pragma-line detector
 matches lines beginning with `{-#`. A pragma written across multiple lines has
-its continuation lines omitted from the hash.
+its continuation lines omitted from the hash. This affects both the per-file
+pragma chunk in the dep hash *and* the implicit-dispatch heuristic
+(`OverloadedStrings`, `OverloadedLists`, `RebindableSyntax`): if the
+relevant `{-# LANGUAGE … #-}` pragma is split across lines, the heuristic does
+not detect it and reverts to the pre-fix behaviour for that file.
+
+**Implicit dispatch outside the heuristic's coverage.** The
+implicit-dispatch heuristic in `buildFileIndex` covers
+`OverloadedStrings` (→ `IsString`), `OverloadedLists` (→ `IsList`), and
+`RebindableSyntax` (→ a fixed list of standard rebound names).
+Extensions whose desugaring GHC also fails to record as a HIE Use ident
+*and* which are not covered by this list will still false-negative —
+e.g. arrow notation under `Arrows` if the user defines local `arr`/`>>>`
+that GHC's HIE does not surface as a Use, or new desugarings introduced
+in future GHC releases.
 
 ### False positives (tests run when they don't need to)
 
@@ -660,3 +706,24 @@ it, in order:
     multiple classes.  While we're at it, please also check that
     changes in explicit forall's also invalidate the cache; i.e.
     `forall a b` vs `forall b a`, etc.*
+
+35. *Can you take a look at_every_ Haskell extension, decide if it
+    could pluasibly impact the general approach, and write some tests
+    that confirm/deny those cases?*
+
+36. *So upon reflection, is there anything we need to fix in the
+    library to address these new tests? Or does the library handle
+    everything the way one would expect?*
+
+    *Can you investigate, then update the readme, the changelog, and
+    bump the version appropriately?*
+
+37. *Can you split the test-suite into two parts:*
+
+    1. *Genuine tests of this library itself,*
+    2. *"Demonstration" tests that show the limits: Where it breaks
+       and what it supports.*
+
+    *Note that in the genuine tests of the library itself, it should
+    use it's own `cachable` property in the places where it will
+    work.*
