@@ -1,7 +1,7 @@
 {-# LANGUAGE
     LambdaCase
-  , ScopedTypeVariables
-  #-}
+    , ScopedTypeVariables
+    #-}
 -- | Multi-line pragma fixture.
 --
 -- The @{-# LANGUAGE #-}@ block spans multiple lines.  Only the first

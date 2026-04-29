@@ -5,7 +5,7 @@
 -- synonym defined in 'PatSynData'.
 module PatSynFix (patSynResult) where
 
-import PatSynData (Tree (..), pattern Bin)
+import           PatSynData (Tree (..), pattern Bin)
 
 patSynResult :: Int
 patSynResult = case Bin TLeaf 7 TLeaf of

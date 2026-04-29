@@ -7,7 +7,7 @@
 -- the class-edge BFS.
 module OvStrFix (S(..), greetOvStr) where
 
-import Data.String (IsString(..))
+import           Data.String (IsString (..))
 
 newtype S = S String deriving (Eq, Show)
 

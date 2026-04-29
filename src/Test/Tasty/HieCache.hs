@@ -657,10 +657,10 @@ buildFileIndex globalEvBinds (HieData src ast) =
           , ddUsedNames   = ddUsedNames   dd `Set.union` implicitNames
           }
 
-    implicitClasses = Set.fromList $ concat
-      [ [ "IsString" | "OverloadedStrings" `Set.member` fileExts ]
-      , [ "IsList"   | "OverloadedLists"   `Set.member` fileExts ]
-      ]
+    implicitClasses = Set.fromList $
+      [ "IsString" | "OverloadedStrings" `Set.member` fileExts ] ++
+      [ "IsList"   | "OverloadedLists"   `Set.member` fileExts ]
+
 
     -- Names rebindable by 'RebindableSyntax'.  These are the standard
     -- desugaring targets the GHC user's guide enumerates (do-notation,
@@ -703,7 +703,7 @@ buildFileIndex globalEvBinds (HieData src ast) =
     -- and method bodies' local bindings should already be reached via
     -- the regular name-edge BFS).
     classIdx :: ClassIndex
-    classIdx = Map.fromListWith Set.union (concatMap goClass [ast])
+    classIdx = Map.fromListWith Set.union (goClass ast)
       where
         goClass node =
           case nodeImmediateChildClasses node of
@@ -730,9 +730,9 @@ buildFileIndex globalEvBinds (HieData src ast) =
           , Just clsName <- map ctxInstClass (Set.toList (HIE.identInfo details))
           ]
 
-        isBindCtx HIE.MatchBind  = True
+        isBindCtx HIE.MatchBind    = True
         isBindCtx (HIE.ValBind {}) = True
-        isBindCtx _              = False
+        isBindCtx _                = False
 
     mergeDeclData (DeclData c1 u1 cl1) (DeclData c2 u2 cl2) =
       DeclData (c1 ++ c2) (Set.union u1 u2) (Set.union cl1 cl2)

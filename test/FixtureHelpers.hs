@@ -12,13 +12,13 @@ module FixtureHelpers
   , assertFingerprintUnchanged
   ) where
 
-import qualified Data.ByteString              as BS
-import qualified Data.ByteString.Char8        as BSC
-import qualified Data.Map.Strict              as Map
-import           GHC.Fingerprint              (Fingerprint (..))
+import qualified Data.ByteString       as BS
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.Map.Strict       as Map
+import           GHC.Fingerprint       (Fingerprint (..))
 import           Test.Tasty.HUnit
 
-import           Test.Tasty.HieCache          (internalComputeFingerprint)
+import           Test.Tasty.HieCache   (internalComputeFingerprint)
 
 -- | Compute fingerprints for @leafName@ before and after applying the
 -- given source-byte substitution to @hieFile@'s in-memory copy of

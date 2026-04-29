@@ -59,16 +59,16 @@ test-suite tests
     Arithmetic
     CPPDemo
     DefSigFix
+    Demos
     Diamond
     DKindsFix
     Expr
-    ExtensionCoverage
-    FalseNegatives
     FixtureHelpers
     GNDFix
     ImpParFix
     Instances
     Lib
+    Library
     Meta
     MultiLinePragmaFix
     OvLabFix

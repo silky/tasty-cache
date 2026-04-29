@@ -1,6 +1,5 @@
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE DerivingVia        #-}
-{-# LANGUAGE FlexibleInstances  #-}
+{-# LANGUAGE DerivingVia       #-}
+{-# LANGUAGE FlexibleInstances #-}
 -- | DerivingVia fixture.
 --
 -- 'ViaThing' gets its 'Speaker' instance via the @Loud@ newtype, whose

@@ -54,6 +54,17 @@ caching strategy.
   `StandaloneDeriving`, `PatternSynonyms`, `TypeFamilies`, `DataKinds`,
   and `ImplicitParams` correctly — these now have explicit regression
   coverage rather than relying on incidental behaviour.
+- Reorganise the test suite into two top-level groups:
+    * `test/Library.hs` — genuine library tests (source-navigation
+      helpers, cache-key logic, pragma & cabal hashing, fingerprint
+      mutation tests).  The whole tree is wrapped in `cacheable`; the
+      project dogfoods its own cache.
+    * `test/Demos.hs` — demonstration tests that show what the cache
+      supports (cacheable per-area and per-extension demos) and where
+      it breaks (always-run demos for mutual recursion, Template
+      Haskell, CPP, multi-line pragmas).
+  The previous `FalseNegatives` and `ExtensionCoverage` modules are
+  removed; their content lives in `Library` and `Demos` respectively.
 
 ## 0.1.1.0 — 2026-04-28
 

@@ -9,7 +9,7 @@ module DKindsFix (Tag (..), Tagged (..), describeTag, dKindsResult) where
 
 data Tag = Foo | Bar
 
-data Tagged (t :: Tag) = Tagged Int
+newtype Tagged (t :: Tag) = Tagged Int
 
 describeTag :: Tagged 'Foo -> String
 describeTag (Tagged n) = "dkinds-foo-prefix " ++ show n

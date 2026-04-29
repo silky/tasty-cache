@@ -6,7 +6,7 @@
 -- module from the data type's declaration.
 module StdDerivFix (stdDerivResult) where
 
-import StdDerivData (StdData (..))
+import           StdDerivData (StdData (..))
 
 deriving instance Show StdData
 

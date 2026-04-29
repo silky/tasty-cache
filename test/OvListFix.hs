@@ -1,12 +1,12 @@
 {-# LANGUAGE OverloadedLists #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeFamilies    #-}
 -- | OverloadedLists fixture.
 --
 -- A list literal in 'sampleOvList' desugars to 'fromListN'/'fromList'
 -- via the 'IsList L' dictionary.  Class-edge BFS test territory.
 module OvListFix (L(..), sampleOvList) where
 
-import GHC.Exts (IsList(..))
+import           GHC.Exts (IsList (..))
 
 newtype L = L [Int] deriving (Eq, Show)
 
