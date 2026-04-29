@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.1.2.0 — 2026-04-29
+
+Close three implicit-dispatch false negatives surfaced by an
+extension-coverage audit, and ship a per-extension regression suite
+that classifies every documented GHC language extension against the
+caching strategy.
+
+- New heuristic in `buildFileIndex`: parse the file's single-line
+  `{-# LANGUAGE … #-}` pragmas and conservatively augment every
+  binding's `ddUsedClasses` / `ddUsedNames` based on which implicit
+  dispatch the extension enables.  GHC's HIE does not record an
+  `EvidenceVarUse` (or any other Use ident) for several desugarings —
+  string literals under `OverloadedStrings`, list literals under
+  `OverloadedLists`, or `if-then-else` / `do` / numeric-literal forms
+  under `RebindableSyntax` — at the binding's span, so the existing
+  class-edge / name-edge BFS could not reach the relevant instance
+  methods or local rebindings.  Augmentation:
+    * `OverloadedStrings` → add `IsString` to `ddUsedClasses`
+    * `OverloadedLists`   → add `IsList`   to `ddUsedClasses`
+    * `RebindableSyntax`  → add the standard rebound names
+      (`ifThenElse`, `>>=`, `>>`, `return`, `fail`, `fromInteger`,
+      `fromRational`, `fromString`, `fromList`, `fromLabel`, `negate`,
+      `arr`, `>>>`, `first`) to `ddUsedNames`
+  The augmentation is over-approximating (a binding with no string
+  literal still claims `IsString`), consistent with the project's
+  existing "false positives over false negatives" stance.
+- New helper `pragmaExtensions :: ByteString -> Set String` parses
+  single-line `{-# LANGUAGE … #-}` pragmas (multi-line blocks remain a
+  documented limitation, same as the existing pragma-line filter).
+- New `ExtensionCoverage` test module — `test/ExtensionCoverage.hs` —
+  splits every documented GHC extension into five buckets:
+    * **CAT-A** source-byte (any syntactic edit propagates),
+    * **CAT-B** single-line pragma capture,
+    * **CAT-C** cabal hash captures `default-extensions` / `ghc-options`,
+    * **CAT-D** implicit dispatch / synthesised binding / type-level
+      edge — one mutation test per extension,
+    * **CAT-E** known limitations pinned as regression tests.
+  A new fixture module per CAT-D extension lives at the top of `test/`
+  so the cache loader (which uses non-recursive `listDirectory ".hie"`)
+  finds the resulting `.hie` files.  Fixtures: `OvStrFix`, `OvListFix`,
+  `OvLabFix`, `RebindFix`, `DefSigFix`, `AnyClassFix`, `ViaFix`,
+  `GNDFix`, `StdDerivData` + `StdDerivFix`, `PatSynData` + `PatSynFix`,
+  `TyFamFix`, `DKindsFix`, `ImpParFix`, plus `MultiLinePragmaFix` for
+  the multi-line pragma pinning test.
+- Refactor: extract `assertFingerprintChanged` and
+  `assertFingerprintUnchanged` from `FalseNegatives.hs` into a new
+  shared helper module `test/FixtureHelpers.hs`, used by both
+  `FalseNegatives` and `ExtensionCoverage`.
+- Confirmed via fingerprint-mutation tests that the existing strategy
+  already handles `OverloadedLabels`, `DefaultSignatures`,
+  `DeriveAnyClass`, `DerivingVia`, `GeneralizedNewtypeDeriving`,
+  `StandaloneDeriving`, `PatternSynonyms`, `TypeFamilies`, `DataKinds`,
+  and `ImplicitParams` correctly — these now have explicit regression
+  coverage rather than relying on incidental behaviour.
+
 ## 0.1.1.0 — 2026-04-28
 
 Fix the instance-resolution false negative: editing the body of an

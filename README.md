@@ -195,6 +195,20 @@ implicitly-invoked method (e.g. `fromInteger`, `fromString`) on the
 relevant instance is edited — even though the method's name appears
 nowhere in the test body or the polymorphic helper's source.
 
+The BFS is supplemented with an **implicit-dispatch heuristic** for
+extensions whose desugaring GHC does not record as a HIE-level Use
+ident at the binding's span. When a file's single-line
+`{-# LANGUAGE … #-}` pragmas enable `OverloadedStrings`,
+`OverloadedLists`, or `RebindableSyntax`, every binding in that file
+conservatively claims a dependency on the corresponding class
+(`IsString`, `IsList`) or the standard rebound names (`ifThenElse`,
+`>>=`, `fromInteger`, `fromString`, `fromList`, `negate`, …) — so
+edits to a `fromString` body, a `fromList` body, or a local
+`ifThenElse` propagate to every test that reaches a binding in that
+file. This is intentionally over-approximating: a file with
+`OverloadedStrings` enabled but no string literal in a particular
+binding still gets `IsString` added.
+
 The resolution is class-only, not class-and-type, so it is conservative
 (over-approximating). Concretely: editing *any* `Num` instance's body —
 even one specialised at a type the test never uses — invalidates every
@@ -286,7 +300,10 @@ The dep hash covers the **transitive closure** of the HIE identifier graph:
 | Edit `isEven` | `isEven` tests **and** `isOdd` tests (since `isOdd` calls `isEven`) |
 | Edit a TH template body (`adderExpr`) | Tests using that splice (`add5`, `add10`) but not others (`timesBy3`) |
 | Change `#define SCALE_FACTOR` | All tests in that CPP module (whole-file hashed) |
-| Add/remove a `{-# LANGUAGE #-}` pragma | All tests that transitively depend on that module |
+| Add/remove a `{-# LANGUAGE #-}` pragma (single-line) | All tests that transitively depend on that module |
+| Edit `fromString` in an `IsString` instance (under `OverloadedStrings`) | All tests that reach a binding in any file with `OverloadedStrings` enabled |
+| Edit `fromList` in an `IsList` instance (under `OverloadedLists`) | All tests that reach a binding in any file with `OverloadedLists` enabled |
+| Edit a local `ifThenElse` / `>>=` / `fromInteger` (under `RebindableSyntax`) | All tests that reach a binding in any file with `RebindableSyntax` enabled |
 | Edit a `.cabal` file | All `cacheable` tests (cabal hash covers `default-extensions` etc.) |
 | Edit an unrelated function | Nothing — those tests stay cached |
 | Any change to a non-`cacheable` test | That test always runs anyway |
@@ -410,6 +427,7 @@ patterns the cache handles:
 | `Arithmetic` | no | Always runs; Template Haskell — splice dependency tracking |
 | `CPPDemo` | no | Always runs; CPP `#define` changes caught via whole-file hashing |
 | `FalseNegatives` | no | Demonstrates false-negative scenarios in the caching logic (see below) |
+| `ExtensionCoverage` (+ 14 fixtures) | no | Per-extension coverage matrix — confirms what the cache catches under `OverloadedStrings`, `OverloadedLists`, `OverloadedLabels`, `RebindableSyntax`, `DefaultSignatures`, `DeriveAnyClass`, `DerivingVia`, `GeneralizedNewtypeDeriving`, `StandaloneDeriving`, `PatternSynonyms`, `TypeFamilies`, `DataKinds`, `ImplicitParams`, and pinning tests for `CPP` and multi-line pragmas |
 
 ## Known limitations
 
@@ -442,7 +460,21 @@ not invalidate those tests.
 
 **Multi-line pragmas only partially captured.** The pragma-line detector
 matches lines beginning with `{-#`. A pragma written across multiple lines has
-its continuation lines omitted from the hash.
+its continuation lines omitted from the hash. This affects both the per-file
+pragma chunk in the dep hash *and* the implicit-dispatch heuristic
+(`OverloadedStrings`, `OverloadedLists`, `RebindableSyntax`): if the
+relevant `{-# LANGUAGE … #-}` pragma is split across lines, the heuristic does
+not detect it and reverts to the pre-fix behaviour for that file.
+
+**Implicit dispatch outside the heuristic's coverage.** The
+implicit-dispatch heuristic in `buildFileIndex` covers
+`OverloadedStrings` (→ `IsString`), `OverloadedLists` (→ `IsList`), and
+`RebindableSyntax` (→ a fixed list of standard rebound names).
+Extensions whose desugaring GHC also fails to record as a HIE Use ident
+*and* which are not covered by this list will still false-negative —
+e.g. arrow notation under `Arrows` if the user defines local `arr`/`>>>`
+that GHC's HIE does not surface as a Use, or new desugarings introduced
+in future GHC releases.
 
 ### False positives (tests run when they don't need to)
 

@@ -4,15 +4,30 @@ import           Test.Tasty
 import           Test.Tasty.HieCache (cacheable, defaultMainWithHieCache)
 import           Test.Tasty.HUnit
 
+import           AnyClassFix         (greetAnyClass)
 import           Arithmetic          (add10, add5, timesBy3)
 import           CPPDemo             (cppVersion, scaled)
+import           DefSigFix           (defSigResult)
 import           Diamond             (base, combined, partA, partB)
+import           DKindsFix           (dKindsResult)
 import           Expr                (Expr (..), eval, pretty)
+import           ExtensionCoverage   (extensionCoverageTests)
 import           FalseNegatives      (falseNegativeTests)
+import           GNDFix              (gndResult)
+import           ImpParFix           (impParResult)
 import           Instances           (Foo (..))
 import           Lib                 (add, factorial)
+import           MultiLinePragmaFix  (mlpResult)
+import           OvLabFix            (Lbl (..), sampleOvLabel)
+import           OvListFix           (L (..), sampleOvList)
+import           OvStrFix            (S (..), greetOvStr)
 import           Parity              (collatz, isEven, isOdd)
+import           PatSynFix           (patSynResult)
 import           Polymorphic         (pair, poly, roast)
+import           RebindFix           (rebindIf)
+import           StdDerivFix         (stdDerivResult)
+import           TyFamFix            (tyFamResult)
+import           ViaFix              (viaResult)
 
 main :: IO ()
 main = defaultMainWithHieCache tests
@@ -98,4 +113,28 @@ tests = testGroup "scenarios"
 
   -- False-negative demonstration tests (always runs).
   , falseNegativeTests
+
+  -- Extension-coverage fixtures: each testCase here is the leaf-name
+  -- target for a mutation test in 'extensionCoverageTests'.  Not wrapped
+  -- in 'cacheable'; behaviour is verified end-to-end on every run, and
+  -- the testCase string must be present in Main.hie for findSubstring.
+  , testGroup "Extension fixtures"
+    [ testCase "OvStr greet hello"            $ greetOvStr     @?= S "ovstr:world"
+    , testCase "OvList sample 1 2 3"          $ sampleOvList   @?= L [1,2,3,99999]
+    , testCase "OvLab sample k"               $ sampleOvLabel  @?= Lbl "ovlabel-k"
+    , testCase "Rebind if 1 else 2"           $ rebindIf       @?= 1 + 1000
+    , testCase "DefSig describe 42"           $ defSigResult   @?= "defsig-prefix DefSigUser 42"
+    , testCase "AnyClass hello AnyClass"      $ greetAnyClass  @?= "anyclass-greeting"
+    , testCase "Via shout ViaThing 7"         $ viaResult      @?= "via-loud-prefix 7"
+    , testCase "GND bark GNDThing 5"          $ gndResult      @?= "gnd-bark 5"
+    , testCase "StdDeriv show StdBranch"      $ stdDerivResult @?= "stdderiv-prefix StdBranch StdLeaf StdLeaf"
+    , testCase "PatSyn Bin 7"                 $ patSynResult   @?= 7 + 5000
+    , testCase "TyFam listElem 1 2 3"         $ tyFamResult    @?= 1 + 7000
+    , testCase "DKinds describeTag Foo"       $ dKindsResult   @?= "dkinds-foo-prefix 5"
+    , testCase "ImpPar greetImpl world"       $ impParResult   @?= "imppar-hello world"
+    , testCase "MLP zero"                     $ mlpResult 0    @?= "mlp-zero"
+    ]
+
+  -- Extension-coverage mutation/sanity tests.
+  , extensionCoverageTests
   ]
