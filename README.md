@@ -179,6 +179,40 @@ cabal_hash  = hash of all .cabal files in the project root
 The transitive dependency set is computed by BFS over the HIE identifier
 graph, starting from the names used in the test body and following `Use`
 references through every reachable declaration in every library module.
+Each binding's chunks include both its equation lines and its type
+signature line(s), so signature-only edits — for example swapping the
+order of variables in an explicit `forall`, which is observable under
+`TypeApplications` — also invalidate.
+
+The BFS also follows **class edges**: whenever a test body or a visited
+binding contains an `EvidenceVarUse` ident — GHC's HIE-level marker for a
+type-class dictionary application — `tasty-cache` resolves the evidence
+variable (chasing `EvLetBind` aliases until it reaches an `EvInstBind`) to
+its class, then enqueues every binding declared inside any `instance C T`
+of that class across every HIE file. This is what makes a polymorphic
+test like `poly @Foo 3 @?= Foo 10` correctly invalidate when an
+implicitly-invoked method (e.g. `fromInteger`, `fromString`) on the
+relevant instance is edited — even though the method's name appears
+nowhere in the test body or the polymorphic helper's source.
+
+The resolution is class-only, not class-and-type, so it is conservative
+(over-approximating). Concretely: editing *any* `Num` instance's body —
+even one specialised at a type the test never uses — invalidates every
+test that goes through some `Num` dictionary; and editing *any* method
+of the relevant instance — even one the test never invokes —
+invalidates as well. Both behaviours are intentional and exercised by
+the `Instance resolution` group in `test/FalseNegatives.hs`.
+
+The conservatism propagates transitively in one direction worth knowing:
+GHC generates `(-)` as a default-method body (`x - y = x + negate y`)
+whose `(+)` and `negate` dispatch through the user-defined `Num`
+dictionary. That dictionary *is* in the global evidence-var index, so
+`(-)`'s own `ddUsedClasses` ends up containing `Num`. Tests that go
+through `(-)` therefore pull in every `Num` method via the class edge —
+even monomorphic `Int` tests like `factorial 5 == 120`. Tests that go
+only through `(+)` (e.g. `add 1 2 == 3`) do not, because `(+)`
+dispatches through `Num Int`'s dict from `base`, which lies outside
+*our* HIE files and so resolves to nothing.
 
 On each run the ingredient compares fingerprints against a cache
 (`.cache/hie-tasty-cache`). Tests whose fingerprint is unchanged are replaced
@@ -363,14 +397,15 @@ deleting it causes all `cacheable` tests to run on the next invocation.
 
 ## Test scenarios
 
-The bundled test suite (`test/Main.hs`) contains 45 tests across 7 modules,
-demonstrating the range of dependency patterns the cache handles:
+The bundled test suite (`test/Main.hs`) demonstrates the range of dependency
+patterns the cache handles:
 
 | Module | `cacheable`? | What it demonstrates |
 |---|---|---|
 | `Lib` | yes | Basic direct dep — editing `factorial` doesn't invalidate `add` tests |
 | `Parity` | no | Always runs; mutual recursion — `isEven`/`isOdd` call each other |
 | `Expr` | yes | GADT — `eval` and `pretty` are independent; editing one doesn't invalidate the other |
+| `Polymorphic` (+ `Instances`) | yes | Polymorphic helper used at `Foo` whose `Num` instance lives in another module — exercises the class-edge BFS that follows type-class evidence into instance bodies |
 | `Diamond` | yes | Diamond deps — `combined → partA/partB → base`; editing `base` invalidates all four |
 | `Arithmetic` | no | Always runs; Template Haskell — splice dependency tracking |
 | `CPPDemo` | no | Always runs; CPP `#define` changes caught via whole-file hashing |
@@ -579,3 +614,49 @@ it, in order:
 
     *Can you make sure the documentation on the code is compatiable with
     hackage-style documentation?*
+
+29. *A user had the following question:*
+
+    *How does it work in the presence of overloaded identifiers? I assume
+    you must somehow resolve which instances are used in each particular
+    test case and track changes to respective definitions. Is it possible
+    to do it just through HIE files, without type checking?*
+
+    *Say, you have `factorial :: Num a => a -> a` and want to test that
+    `factorial @Foo 5 = 120`. The definition of `factorial` has not
+    changed and same for the type declaration of `Foo`. But how do you
+    check that `instance Num Foo` remains the same? We don't even know
+    upfront where it is defined.*
+
+    *Please have a think about how this library handles this case; you
+    can:*
+
+    1. *Add a test case to verify this behaviour,*
+    2. *Investigate solutions, or decide that there is no solution,*
+    3. *Perhaps see if you can at least* detect *this, and emit a warning,*
+    4. *Or come up with some alternative.*
+
+30. *Please do attempt to make the fix to `transitiveDeps` and do the
+    re-work.*
+
+    *Before embarking on this, please make sure you have a test that
+    fails now, and succeeds when you've completed the work.*
+
+    *I don't mind a redesign of the data model.*
+
+31. *Can you update the CHANGELOG with this change; the README with the
+    log of prompts from this session, and then bump the version to
+    0.1.1.0 to reflect this fix.*
+
+32. *As a final check, can you add a couple of other tests to the
+    instance section; i.e. functions with multiple instances where only
+    one changes; and anything else interesting you can think of, and
+    verify that it all works.*
+
+33. *Please make sure the changelog and readme reflect this.*
+
+34. *Just as a final confirmation, please add a few more tests to the
+    "Polymorphic.hs" file that demonstrates the fixes; i.e. using
+    multiple classes.  While we're at it, please also check that
+    changes in explicit forall's also invalidate the cache; i.e.
+    `forall a b` vs `forall b a`, etc.*

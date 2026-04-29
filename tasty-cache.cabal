@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               tasty-cache
-version:            0.1.0.0
+version:            0.1.1.0
 synopsis:           Tasty ingredient that skips unchanged tests using GHC HIE files
 description:
   A Tasty ingredient that fingerprints each test against its source bytes and
@@ -60,9 +60,11 @@ test-suite tests
     Diamond
     Expr
     FalseNegatives
+    Instances
     Lib
     Meta
     Parity
+    Polymorphic
   build-depends:
     , base             >= 4.17 && < 5
     , bytestring
