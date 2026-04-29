@@ -38,6 +38,8 @@ version := `awk '/^version:/ {print $2}' tasty-cache.cabal`
 
 # publish to hackage
 publish: build
+  cabal sdist
+
   cabal check
 
   cabal haddock --haddock-for-hackage --enable-doc
