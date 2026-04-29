@@ -5,13 +5,16 @@
 -- which this can happen.
 module FalseNegatives (falseNegativeTests) where
 
+import qualified Data.ByteString              as BS
 import qualified Data.ByteString.Char8        as BSC
 import qualified Data.Map.Strict              as Map
 import           Data.Set                     (Set)
 import qualified Data.Set                     as Set
+import           GHC.Fingerprint              (Fingerprint (..))
 import           Test.Tasty
 import           Test.Tasty.HUnit
 
+import           Test.Tasty.HieCache          (internalComputeFingerprint)
 import           Test.Tasty.HieCache.Internal (countIndent, findExprEnd,
                                                pathKey)
 
@@ -197,31 +200,27 @@ findExprEndTests = testGroup "findExprEnd blank-line truncation"
 -- ---------------------------------------------------------------------------
 -- 4. Instance resolution / overloaded identifiers
 --
--- The dependency BFS matches identifiers by *occurrence name* (a bare
--- string).  This means an instance method @m@ is followed only if some
--- declaration on the BFS path textually mentions the name @m@.
+-- These tests motivate and verify the class-edge BFS extension that
+-- 'transitiveDeps' applies on top of the plain name-edge BFS.
 --
--- For most class methods this works by accident: a polymorphic helper that
--- uses @m@ at all will textually contain the string @"m"@, and the BFS will
--- visit every binding named @m@ in every file — including the relevant
--- instance method.  (This is the source of the documented `occName`
--- collision false positive.)
+-- The first two unit tests model only the *name-edge* BFS in pure
+-- Haskell to demonstrate the false negative that necessitates the class
+-- edges: an instance method invoked implicitly through type-class
+-- resolution (@fromInteger@ at a numeric literal, for example) is not
+-- reached by the name-edge BFS because no name on the BFS path
+-- textually mentions it.
 --
--- The blind spot is methods invoked *implicitly* through type-class
--- resolution rather than by name in source.  The clearest example is
--- numeric literals: @poly x = x * x + 1@ uses @fromInteger@ at the call
--- site whenever @poly@ is specialised at a @Num@ instance, but the string
--- @"fromInteger"@ does not appear in @poly@'s body.  Editing @fromInteger@
--- in the relevant @Num@ instance can break the test without changing any
--- name on the BFS path, so the cache wrongly serves the stale result.
---
--- The test below models the BFS in pure code and asserts that, given a
--- test body that names @poly@ and a @poly@ whose used-name set is
--- @{*, +}@, the reachable name set excludes @fromInteger@ and @negate@ —
--- so changes to those instance methods are invisible to the cache.
+-- The third test ('fromInteger edit changes poly fingerprint') is an
+-- end-to-end check against real HIE files: it loads the project's HIE
+-- files, applies an in-memory mutation to @Instances.hs@'s
+-- @fromInteger@ clause (without recompiling), and asserts that the
+-- fingerprint of @poly @Foo 3 == Foo 10@ changes.  This passes only
+-- when the class-edge BFS chases the evidence-var application from the
+-- test body's @poly@ call into the @Num Foo@ instance and folds its
+-- method bodies into the dep hash.
 
 instanceResolutionTests :: TestTree
-instanceResolutionTests = testGroup "Instance resolution staleness"
+instanceResolutionTests = testGroup "Instance resolution"
   [ testCase "name-only BFS misses instance methods not textually reachable" $ do
       -- Names directly used in the test body `poly (Foo 3) @?= Foo 10`:
       let testBodyNames = Set.fromList ["poly", "Foo"]
@@ -275,7 +274,181 @@ instanceResolutionTests = testGroup "Instance resolution staleness"
       -- abs is still not reached: not textually mentioned anywhere.
       assertBool "abs (not textually used) is still unreachable"
         (not (Set.member "abs" reachable))
+
+    -- End-to-end check against real HIE files: mutate the source bytes
+    -- of `Instances.hs`'s `fromInteger` clause in memory and require
+    -- that the fingerprint of `poly @Foo 3 == Foo 10` changes.  The
+    -- mutation does not touch any name on the bare-name BFS path, so
+    -- prior to the evidence-following BFS this test fails.
+    -- Built via 'unwords' so the source bytes of this test module do
+    -- not contain the contiguous string literals — otherwise
+    -- 'internalComputeFingerprint''s 'findSubstring' would locate them
+    -- here (sorted before "Main.hie") and pick this file as the test's
+    -- home.
+  , testCase "fromInteger edit on Num Foo invalidates poly @Foo" $
+      assertFingerprintChanged
+        (unwords ["poly", "@Foo", "3", "==", "Foo", "10"])
+        "test/Instances.hs"
+        "Instances.hie"
+        "Foo (fromInteger n)"
+        "Foo (fromInteger n + 100)"
+
+    -- Over-approximation: visiting class @Num@ enqueues every method of
+    -- every @Num@ instance in every file.  So even editing an
+    -- *unused* method (@signum@) of the relevant instance changes the
+    -- dep hash for tests that use that class.  False positive,
+    -- intentional.
+  , testCase "unused Num Foo method (signum) edit invalidates poly @Foo" $
+      assertFingerprintChanged
+        (unwords ["poly", "@Foo", "3", "==", "Foo", "10"])
+        "test/Instances.hs"
+        "Instances.hie"
+        "Foo (signum a)"
+        "Foo (signum a + 1)"
+
+    -- Over-approximation across *types* of the same class: editing
+    -- @instance Num Bar@ — which @poly @Foo@ never uses — still
+    -- invalidates the @poly @Foo@ test, because the class-edge BFS is
+    -- class-only (not class+type).  The conservative direction.
+  , testCase "edit on unrelated Num Bar invalidates poly @Foo" $
+      assertFingerprintChanged
+        (unwords ["poly", "@Foo", "3", "==", "Foo", "10"])
+        "test/Instances.hs"
+        "Instances.hie"
+        "Bar (fromInteger n)"
+        "Bar (fromInteger n + 100)"
+
+    -- Precision boundary: a monomorphic Int test that uses *only*
+    -- bare-name operators whose own body has no class-edge propagation
+    -- is NOT invalidated by edits to user-defined instances of that
+    -- class.  @add 1 2 == 3@ goes through @add@ → @(+)@; the @(+)@
+    -- bindings inside @instance Num Foo@ and @instance Num Bar@ have
+    -- empty 'ddUsedClasses' (their bodies dispatch on @Int@'s @Num@,
+    -- whose evidence chain ends in @base@ — outside our globalEvBinds
+    -- — and so resolves to nothing).  No class edge is taken; the
+    -- @fromInteger@ bytes never enter the dep set; mutation does not
+    -- change the fingerprint.
+    --
+    -- Caveat: this precision does not extend to tests that touch
+    -- @(-)@.  GHC generates @(-)@ as a default-method body
+    -- (@x - y = x + negate y@) whose @+@ and @negate@ are dispatched
+    -- through the /user-defined/ instance dictionary; that dictionary
+    -- /is/ in 'globalEvBinds', so resolution succeeds and @(-)@'s
+    -- 'ddUsedClasses' contains @Num@ — pulling every @Num@ method
+    -- into the dep set even from monomorphic tests like
+    -- @factorial 5 == 120@ that go via @(-)@.  Documented as a known
+    -- over-approximation.
+  , testCase "Num Foo fromInteger edit does NOT invalidate add 1 2 == 3" $
+      assertFingerprintUnchanged
+        (unwords ["add", "1", "2", "==", "3"])
+        "test/Instances.hs"
+        "Instances.hie"
+        "Foo (fromInteger n)"
+        "Foo (fromInteger n + 100)"
+
+    -- Multi-class case A: editing the @Greet Foo@ method invalidates a
+    -- test that uses both @Greet@ and @Insult@ via @roast@.  The
+    -- class-edge BFS pulls in /every/ class on the test body's
+    -- evidence frontier, not only the first.
+  , testCase "Greet Foo edit invalidates roast (Foo 3)" $
+      assertFingerprintChanged
+        (unwords ["roast", "(Foo", "3)", "uses", "both", "Greet",
+                  "and", "Insult", "instances"])
+        "test/Instances.hs"
+        "Instances.hie"
+        "\"Hello Foo \""
+        "\"Howdy Foo \""
+
+    -- Multi-class case B: same test body, edit the *other* class's
+    -- instance.  Same outcome.  Together with case A this proves
+    -- multi-class evidence is not collapsed to a single class.
+  , testCase "Insult Foo edit invalidates roast (Foo 3)" $
+      assertFingerprintChanged
+        (unwords ["roast", "(Foo", "3)", "uses", "both", "Greet",
+                  "and", "Insult", "instances"])
+        "test/Instances.hs"
+        "Instances.hie"
+        "\" is silly\""
+        "\" is splendid\""
+
+    -- Explicit @forall@ ordering matters semantically under
+    -- @TypeApplications@ — @pair @Int @String@ binds different
+    -- variables depending on whether the signature is
+    -- @forall a b@ or @forall b a@ — so a swap of forall order has
+    -- to invalidate the cache.  This relies on the type-signature
+    -- bytes being part of the dep hash.
+  , testCase "swapping forall a b -> forall b a invalidates pair test" $
+      assertFingerprintChanged
+        (unwords ["pair", "returns", "a", "tuple", "of", "its", "arguments"])
+        "test/Polymorphic.hs"
+        "Polymorphic.hie"
+        "forall a b. a -> b -> (a, b)"
+        "forall b a. a -> b -> (a, b)"
   ]
+
+-- | Compute fingerprints for @leafName@ before and after applying the
+-- given source-byte substitution to @hieFile@'s in-memory copy of
+-- @hsFile@.
+fingerprintBeforeAfter
+  :: String       -- leaf name of the test
+  -> FilePath     -- on-disk source file (read for the original bytes)
+  -> FilePath     -- HIE filename to override (key into the overrides map)
+  -> String       -- needle: substring to replace
+  -> String       -- replacement
+  -> IO (Maybe Fingerprint, Maybe Fingerprint)
+fingerprintBeforeAfter leafName hsFile hieFile needle replacem = do
+  let cabalHash = Fingerprint 0 0
+      hieDir    = ".hie"
+      needleBs  = BSC.pack needle
+      replBs    = BSC.pack replacem
+  origBytes <- BS.readFile hsFile
+  let mutated = case BSC.breakSubstring needleBs origBytes of
+        (before, rest)
+          | BS.null rest -> error
+              ("fixture broken: needle '" ++ needle ++
+               "' not in " ++ hsFile)
+          | otherwise ->
+              before <> replBs <> BS.drop (BS.length needleBs) rest
+      overrides = Map.singleton hieFile mutated
+  fp1 <- internalComputeFingerprint hieDir Map.empty cabalHash leafName
+  fp2 <- internalComputeFingerprint hieDir overrides cabalHash leafName
+  return (fp1, fp2)
+
+-- | Assert that mutating the given source needle changes the
+-- fingerprint of the named test.
+assertFingerprintChanged
+  :: String -> FilePath -> FilePath -> String -> String -> Assertion
+assertFingerprintChanged leafName hsFile hieFile needle replacem = do
+  (fp1, fp2) <- fingerprintBeforeAfter leafName hsFile hieFile needle replacem
+  case (fp1, fp2) of
+    (Just a, Just b) ->
+      assertBool
+        ("fingerprint of \"" ++ leafName ++
+         "\" should change after editing '" ++ needle ++
+         "' but got " ++ show a ++ " == " ++ show b)
+        (a /= b)
+    _ ->
+      assertFailure
+        ("could not compute fingerprint for \"" ++ leafName ++
+         "\": fp1=" ++ show fp1 ++ ", fp2=" ++ show fp2)
+
+-- | Assert that mutating the given source needle does /not/ change
+-- the fingerprint of the named test.
+assertFingerprintUnchanged
+  :: String -> FilePath -> FilePath -> String -> String -> Assertion
+assertFingerprintUnchanged leafName hsFile hieFile needle replacem = do
+  (fp1, fp2) <- fingerprintBeforeAfter leafName hsFile hieFile needle replacem
+  case (fp1, fp2) of
+    (Just a, Just b) ->
+      assertBool
+        ("fingerprint of \"" ++ leafName ++
+         "\" should NOT change after editing '" ++ needle ++
+         "' but got " ++ show a ++ " /= " ++ show b)
+        (a == b)
+    _ ->
+      assertFailure
+        ("could not compute fingerprint for \"" ++ leafName ++
+         "\": fp1=" ++ show fp1 ++ ", fp2=" ++ show fp2)
 
 -- A pure model of the @transitiveDeps@ BFS: starting from @start@, visit
 -- every name reachable through @declMap@ (name → names used in its body).

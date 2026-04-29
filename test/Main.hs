@@ -12,7 +12,7 @@ import           FalseNegatives      (falseNegativeTests)
 import           Instances           (Foo (..))
 import           Lib                 (add, factorial)
 import           Parity              (collatz, isEven, isOdd)
-import           Polymorphic         (poly)
+import           Polymorphic         (pair, poly, roast)
 
 main :: IO ()
 main = defaultMainWithHieCache tests
@@ -56,13 +56,20 @@ tests = testGroup "scenarios"
     , testCase "pretty Eq"         $ pretty (Eq (Lit 1) (Lit 2))                       @?= "(1 == 2)"
     ]
 
-  -- Wrapped: demonstrates the instance-resolution false negative.
-  -- The test body names `poly` and `Foo`, but the `Num Foo` instance lives
-  -- in `Instances.hs` and is reached only via type-class resolution at the
-  -- call site.  The current name-only BFS does not follow that edge, so
-  -- editing the body of `instance Num Foo` will not invalidate this test.
-  , cacheable $ testGroup "Polymorphic (instance resolution — known false negative)"
+  -- Wrapped: exercises the class-edge BFS for type-class instance
+  -- resolution.  The test body names `poly` and `Foo`, but the `Num Foo`
+  -- instance lives in `Instances.hs`, and `fromInteger` is invoked only
+  -- via type-class resolution at the call site.  The class-edge BFS
+  -- chases the evidence-var application back to the instance and folds
+  -- its method bodies into the dep hash, so editing the body of
+  -- `instance Num Foo` (e.g. `fromInteger`) correctly invalidates this
+  -- test.
+  , cacheable $ testGroup "Polymorphic (instance resolution via class-edge BFS)"
     [ testCase "poly @Foo 3 == Foo 10" $ poly (Foo 3) @?= Foo 10
+    , testCase "roast (Foo 3) uses both Greet and Insult instances" $
+        roast (Foo 3) @?= "Hello Foo 3 and Foo 3 is silly"
+    , testCase "pair returns a tuple of its arguments" $
+        pair (1 :: Int) ("x" :: String) @?= (1, "x")
     ]
 
   -- Wrapped: transitive BFS means editing 'base' invalidates all four.

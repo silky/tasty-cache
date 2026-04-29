@@ -64,6 +64,8 @@ module Test.Tasty.HieCache
   , hieCacheIngredient
     -- * Opt-in
   , cacheable
+    -- * Internal (not part of the stable API; exposed for testing)
+  , internalComputeFingerprint
   ) where
 
 import           Control.Exception            (SomeException, catch, evaluate,
@@ -107,11 +109,12 @@ import           Test.Tasty.Runners
 
 import qualified GHC.Iface.Ext.Binary         as HIE
 import qualified GHC.Iface.Ext.Types          as HIE
-import           GHC.Types.Name               (nameOccName)
+import           GHC.Types.Name               (Name, nameOccName, nameUnique)
 import           GHC.Types.Name.Cache         (NameCache, initNameCache)
 import           GHC.Types.Name.Occurrence    (occNameString)
 import           GHC.Types.SrcLoc             (RealSrcSpan, srcSpanEndLine,
                                                srcSpanStartLine)
+import           GHC.Types.Unique             (getKey)
 
 -- ---------------------------------------------------------------------------
 -- Public API
@@ -180,18 +183,10 @@ hieCacheIngredient subIngredients = TestManager [Option (Proxy :: Proxy HieCache
         else do
           let paths = collectPaths tree
 
-          (fps, warnings) <- computeFingerprints hieDir paths
+          fps <- computeFingerprints hieDir paths
                    `catch` \(e :: SomeException) -> do
                      hPutStrLn stderr $ "HieCache: fingerprint error: " ++ show e
-                     return (Map.empty, [])
-
-          when (not (null warnings)) $
-            hPutStrLn stderr $
-              "HieCache: " ++ show (length warnings) ++ " of " ++
-              show (length paths) ++
-              " cacheable test(s) use overloaded identifiers; edits to" ++
-              " their instance bodies may not invalidate the cache." ++
-              " See README \"Instance resolution\"."
+                     return Map.empty
 
           cache <- loadCache cachePath
 
@@ -315,20 +310,69 @@ readHieData nc path = do
 -- ---------------------------------------------------------------------------
 -- Fingerprinting
 
--- Per-declaration info: the source bytes for each clause/equation, plus the
--- set of Haskell names that appear as @Use@ within the declaration's body.
--- Used during the transitive-dep BFS.
+-- Per-declaration info: the source bytes for each clause/equation, the set
+-- of Haskell names that appear as @Use@ within the declaration's body, and
+-- the set of type-class names whose evidence is used in the body (which
+-- triggers the class-edge BFS — see 'transitiveDeps').
 data DeclData = DeclData
-  { ddChunks    :: [[BS.ByteString]]  -- source bytes, one inner list per clause
-  , ddUsedNames :: Set String          -- names used (not bound) in the body
+  { ddChunks      :: [[BS.ByteString]] -- source bytes, one inner list per clause
+  , ddUsedNames   :: Set String        -- names used (not bound) in the body
+  , ddUsedClasses :: Set String        -- classes used via evidence in the body
   }
+
+-- | Per-file index from class name to the set of occurrence names of
+-- bindings declared inside instances of that class in that file.  Built
+-- from @Decl InstDec _@ bindings + @EvidenceVarBind (EvInstBind ...)@
+-- containers.
+type ClassIndex = Map String (Set String)
+
+-- | Description of a single evidence-variable binding.  We need to
+-- distinguish two flavours because what GHC writes into HIE files at
+-- call sites is /not/ a direct reference to a top-level instance dict
+-- (@$fNumFoo@).  Instead, GHC introduces a fresh local alias
+-- (@$dNum@) via @EvLetBind@ whose @EvBindDeps@ point to the actual
+-- @$fNumFoo@ — sometimes through several hops of further @EvLetBind@s.
+--
+-- Resolving an @EvidenceVarUse@ to a class therefore means following
+-- the @EvLet@ chain until we reach an @EvInst@.
+data EvBind
+  = EvInst !String     -- ^ @EvInstBind { cls = c }@: the dictionary
+                       --   provides class @c@ directly.
+  | EvLet  ![Word64]   -- ^ @EvLetBind deps@: aliasing binding, may
+                       --   chain to other 'EvBind' entries via @deps@.
+  deriving (Eq, Show)
+
+-- | Global index keyed by 'Unique' (extracted as 'Word64', the underlying
+-- representation since GHC 9.10).  Populated from every
+-- @EvidenceVarBind@ across every HIE file.
+type EvBindIndex = Map Word64 EvBind
+
+uniqWord :: Name -> Word64
+uniqWord = getKey . nameUnique
+
+-- | Walk the 'EvBind' chain starting at @uniq@ to recover the class
+-- whose dictionary the bound evidence variable ultimately provides.
+-- Cycles are guarded against with @visited@.
+resolveEvClass :: EvBindIndex -> Word64 -> Maybe String
+resolveEvClass idx = go Set.empty
+  where
+    go visited u
+      | Set.member u visited = Nothing
+      | otherwise =
+          case Map.lookup u idx of
+            Just (EvInst c)  -> Just c
+            Just (EvLet ds) ->
+              listToMaybe
+                [ c
+                | d <- ds
+                , Just c <- [go (Set.insert u visited) d]
+                ]
+            Nothing -> Nothing
 
 computeFingerprints
   :: FilePath
   -> [TestPath]
-  -> IO (Map String Fingerprint, [String])
-  -- ^ (fingerprints, leaf names of cacheable tests whose bodies use
-  -- overloaded identifiers — see 'hasEvidenceUseInBody').
+  -> IO (Map String Fingerprint)
 computeFingerprints hieDir paths = do
   hieFiles <- sort . filter ((== ".hie") . takeExtension)
                 <$> listDirectory hieDir
@@ -337,9 +381,18 @@ computeFingerprints hieDir paths = do
   rawData <- mapM (\f -> (f,) <$> readHieData nc (hieDir </> f)) hieFiles
   let allData = [ (f, d) | (f, Just d) <- rawData ]
 
-  let declMaps = Map.fromList [ (f, buildDeclMap d) | (f, d) <- allData ]
-  -- Raw source per file — needed for CPP whole-file hashing
-  let fileSrcs  = Map.fromList [ (f, hdSrc d) | (f, d) <- allData ]
+      -- Phase 1: collect every @EvidenceVarBind (EvInstBind cls)@ across
+      -- all files into a global Name → class map.  Done first so that
+      -- per-file decl building (Phase 2) can recognise cross-module
+      -- evidence uses.
+      globalEvBinds = Map.unions [ collectEvBinds d | (_, d) <- allData ]
+
+      -- Phase 2: per-file decl map + class index, using the global
+      -- ev-bind map to compute 'ddUsedClasses'.
+      indices = [ (f, buildFileIndex globalEvBinds d) | (f, d) <- allData ]
+      declMaps     = Map.fromList [ (f, dm) | (f, (dm, _)) <- indices ]
+      classIndices = Map.fromList [ (f, ci) | (f, (_, ci)) <- indices ]
+      fileSrcs     = Map.fromList [ (f, hdSrc d) | (f, d) <- allData ]
 
   -- Hash all .cabal files so that default-extensions changes invalidate the cache
   cabalFiles <- sort . filter ((== ".cabal") . takeExtension) <$> listDirectory "."
@@ -348,36 +401,24 @@ computeFingerprints hieDir paths = do
   let leafMap = Map.fromListWith const
         [ (last p, p) | p <- paths, not (null p) ]
 
-  let results =
-        [ (leafName, path, computeTestFP allData declMaps fileSrcs cabalHash leafName)
-        | (leafName, path) <- Map.toList leafMap
-        ]
-
-  let fps = Map.fromList
-        [ (pathKey path, fp)
-        | (_, path, Just (fp, _)) <- results
-        ]
-      warnings =
-        [ leafName
-        | (leafName, _, Just (_, True)) <- results
-        ]
-  return (fps, warnings)
+  return $ Map.fromList
+    [ (pathKey path, fp)
+    | (leafName, path) <- Map.toList leafMap
+    , Just fp          <- [computeTestFP allData globalEvBinds declMaps
+                                          classIndices fileSrcs cabalHash
+                                          leafName]
+    ]
 
 computeTestFP
   :: [(FilePath, HieData)]
+  -> EvBindIndex
   -> Map FilePath (Map String DeclData)
+  -> Map FilePath ClassIndex
   -> Map FilePath BS.ByteString   -- raw source per file (for CPP handling)
   -> Fingerprint                   -- hash of all .cabal files
   -> String
-  -> Maybe (Fingerprint, Bool)
-  -- ^ The 'Bool' is 'True' iff the test body contains an
-  -- 'HIE.EvidenceVarUse' — i.e. a use of an overloaded identifier whose
-  -- instance dictionary is resolved at the call site.  The dependency BFS
-  -- in this implementation follows occurrence names only and does not
-  -- chase evidence variables, so such tests can have false negatives if
-  -- the relevant @instance@ body is edited without changing any name on a
-  -- BFS-reachable path.  See README \"Instance resolution\".
-computeTestFP allData declMaps fileSrcs cabalHash leafName = do
+  -> Maybe Fingerprint
+computeTestFP allData globalEvBinds declMaps classIndices fileSrcs cabalHash leafName = do
   let quoted = BSC.pack ('"' : leafName ++ "\"")
 
   -- Find which HIE file contains the test name string
@@ -399,35 +440,66 @@ computeTestFP allData declMaps fileSrcs cabalHash leafName = do
   let startLine = 1 + BSC.count '\n' (BS.take lineStart src)
       endLine   = startLine + max 0 (BSC.count '\n' bodyBytes - 1)
 
-  -- Names used within the test body (from HIE identifier graph)
-  let usedNames = getUsedNames (hdAst testData) startLine endLine
+  -- Names and classes used within the test body
+  let usedNames   = getUsedNames   (hdAst testData) startLine endLine
+      usedClasses = getUsedClasses (hdAst testData) globalEvBinds startLine endLine
 
   -- Transitively collect dependency source bytes via BFS over the HIE graph
-  let depChunks = transitiveDeps declMaps fileSrcs testFile usedNames
+  let depChunks = transitiveDeps declMaps classIndices fileSrcs testFile
+                                  usedNames usedClasses
+      depHash   = unsafePerformIO $ hashBytesList (sort depChunks)
 
-  let depHash = unsafePerformIO $ hashBytesList (sort depChunks)
-
-  -- Detect (but do not follow) evidence-variable uses in the test body.
-  let hasEvidence = hasEvidenceUseInBody (hdAst testData) startLine endLine
-
-  return (fingerprintFingerprints [bodyHash, depHash, cabalHash], hasEvidence)
+  return (fingerprintFingerprints [bodyHash, depHash, cabalHash])
 
 -- | BFS over the HIE identifier graph, collecting source bytes for every
 -- declaration reachable from @startNames@ in files other than @testFile@.
 --
--- For files that use CPP the /entire/ file source is included (as one chunk)
--- instead of individual declaration spans, because CPP macro names are
--- invisible to the HIE graph.
+-- The BFS has two kinds of edges:
+--
+-- * /Name edges./ Visiting a binding @n@ pulls in @n@'s source bytes and
+--   adds the names referenced inside @n@'s body ('ddUsedNames') to the
+--   queue.
+--
+-- * /Class edges./ When a binding (or the test body) uses overloaded
+--   identifiers, its 'ddUsedClasses' / @startClasses@ records the
+--   classes whose dictionaries are resolved at the call sites.  Visiting
+--   a class @C@ enqueues the occurrence names of every binding declared
+--   inside any @instance C T@ in any file ('ClassIndex').  Those then
+--   flow through the regular name BFS, which is how instance-method
+--   bodies enter the dep hash even when the body never textually
+--   mentions the method name.
+--
+-- This is an over-approximation: visiting class @Num@ pulls in the
+-- methods of /every/ @Num@ instance in the project, not just the one
+-- specialised to the relevant type.  That is acceptable — false
+-- positives (over-invalidation) are documented; what we are fixing is
+-- the false negative.
+--
+-- For files that use CPP the /entire/ file source is included (as one
+-- chunk) instead of individual declaration spans, because CPP macro
+-- names are invisible to the HIE graph.
 transitiveDeps
   :: Map FilePath (Map String DeclData)
+  -> Map FilePath ClassIndex      -- per-file class → method index
   -> Map FilePath BS.ByteString   -- raw file source
   -> FilePath                      -- test file to exclude
   -> Set String                    -- names used directly in the test body
+  -> Set String                    -- classes used directly in the test body
   -> [BS.ByteString]
-transitiveDeps declMaps fileSrcs testFile startNames =
+transitiveDeps declMaps classIndices fileSrcs testFile startNames startClasses =
     declChunks ++ cppChunks ++ pragmaChunks
   where
-    allPairs = bfs Set.empty Set.empty (Set.toList startNames)
+    -- Method names for the initial set of classes.
+    initialClassMethodNames = Set.unions
+      [ ms
+      | c          <- Set.toList startClasses
+      , (_, ci)    <- Map.toList classIndices
+      , Just ms    <- [Map.lookup c ci]
+      ]
+
+    initialNames = Set.union startNames initialClassMethodNames
+
+    allPairs = bfs Set.empty Set.empty startClasses (Set.toList initialNames)
 
     -- Declaration-specific source bytes for non-CPP files
     declChunks =
@@ -441,7 +513,7 @@ transitiveDeps declMaps fileSrcs testFile startNames =
     -- Whole-file source for any CPP file we touched (deduplicated per file)
     cppChunks =
       [ src
-      | f   <- Set.toList (Set.map fst allPairs)
+      | f        <- Set.toList (Set.map fst allPairs)
       , Just src <- [Map.lookup f fileSrcs]
       , usesCPP src
       ]
@@ -459,72 +531,193 @@ transitiveDeps declMaps fileSrcs testFile startNames =
 
     usesCPP src = BSC.pack "#define " `BSC.isInfixOf` src
 
-    -- BFS: visitedNames prevents re-processing; allPairs accumulates results
-    bfs pairs _ [] = pairs
-    bfs pairs visitedNames (name : queue)
-      | Set.member name visitedNames = bfs pairs visitedNames queue
+    -- BFS over the name queue.  When a binding's body has 'ddUsedClasses'
+    -- we also enqueue every method name from any instance of those
+    -- classes (across all files), tracked via 'visitedClasses' to avoid
+    -- redoing the expansion.
+    bfs pairs _visitedNames _visitedClasses [] = pairs
+    bfs pairs visitedNames visitedClasses (name : queue)
+      | Set.member name visitedNames =
+          bfs pairs visitedNames visitedClasses queue
       | otherwise =
-          let newPairs = Set.fromList
+          let visitedNames' = Set.insert name visitedNames
+              newPairs = Set.fromList
                 [ (f, name)
                 | (f, dm) <- Map.toList declMaps
                 , f /= testFile
                 , Map.member name dm
                 ]
-              visitedNames' = Set.insert name visitedNames
-              newNames =
+              -- Names referenced by the bodies of visited bindings
+              referencedNames =
                 [ n
-                | (f, _) <- Set.toList newPairs
+                | (f, _)  <- Set.toList newPairs
                 , Just dm <- [Map.lookup f declMaps]
                 , Just dd <- [Map.lookup name dm]
                 , n       <- Set.toList (ddUsedNames dd)
-                , not (Set.member n visitedNames')
                 ]
-          in bfs (Set.union pairs newPairs) visitedNames'
-               (queue ++ filter (`Set.notMember` visitedNames') newNames)
+              -- Newly seen classes to expand into method names
+              newClasses =
+                [ c
+                | (f, _)  <- Set.toList newPairs
+                , Just dm <- [Map.lookup f declMaps]
+                , Just dd <- [Map.lookup name dm]
+                , c       <- Set.toList (ddUsedClasses dd)
+                , c `Set.notMember` visitedClasses
+                ]
+              visitedClasses' = Set.union visitedClasses (Set.fromList newClasses)
+              classExpansion =
+                [ m
+                | c       <- newClasses
+                , (_, ci) <- Map.toList classIndices
+                , Just ms <- [Map.lookup c ci]
+                , m       <- Set.toList ms
+                ]
+              moreNames = filter (`Set.notMember` visitedNames')
+                            (referencedNames ++ classExpansion)
+          in bfs (Set.union pairs newPairs) visitedNames' visitedClasses'
+               (queue ++ moreNames)
 
 -- ---------------------------------------------------------------------------
 -- HIE AST analysis
 
--- Build a map from occName to @DeclData@ for every top-level binding in
--- the AST.  Each equation/clause contributes one entry; entries for the same
--- name are merged (source chunks concatenated, used-name sets unioned).
-buildDeclMap :: HieData -> Map String DeclData
-buildDeclMap (HieData src ast) =
-  Map.fromListWith mergeDeclData (concatMap nodeEntries (flatNodes ast))
+-- | Walk every node and collect each @EvidenceVarBind@ into the
+-- 'EvBindIndex'.  Both @EvInstBind@ (the actual top-level instance
+-- dictionaries) and @EvLetBind@ (the per-call-site aliases GHC inserts
+-- when applying a constraint) are recorded; resolution to a class is
+-- via 'resolveEvClass', which follows the @EvLet@ chain to an
+-- @EvInst@.
+--
+-- When the same 'Unique' is bound by both flavours (rare), 'EvInst'
+-- wins so we never lose a direct class.
+collectEvBinds :: HieData -> EvBindIndex
+collectEvBinds (HieData _ ast) =
+  Map.fromListWith preferInst
+    [ (uniqWord name, b)
+    | node <- flatNodes ast
+    , ni <- Map.elems (HIE.getSourcedNodeInfo (HIE.sourcedNodeInfo node))
+    , (Right name, details) <- Map.toList (HIE.nodeIdentifiers ni)
+    , Just b <- map ctxEvBind (Set.toList (HIE.identInfo details))
+    ]
   where
+    flatNodes n = n : concatMap flatNodes (HIE.nodeChildren n)
+
+    preferInst a@(EvInst _) _ = a
+    preferInst _ b@(EvInst _) = b
+    preferInst a            _ = a
+
+-- | Extract the 'EvBind' described by a 'ContextInfo', if any.
+ctxEvBind :: HIE.ContextInfo -> Maybe EvBind
+ctxEvBind (HIE.EvidenceVarBind (HIE.EvInstBind _ clsName) _ _) =
+  Just (EvInst (occNameString (nameOccName clsName)))
+ctxEvBind (HIE.EvidenceVarBind (HIE.EvLetBind deps) _ _) =
+  Just (EvLet (map uniqWord (HIE.getEvBindDeps deps)))
+ctxEvBind _ = Nothing
+
+-- | Return the class 'Name' from an @EvidenceVarBind (EvInstBind …)@
+-- context, or 'Nothing' for any other 'ContextInfo'.  Used by the
+-- per-file class index to identify instance-node containers.
+ctxInstClass :: HIE.ContextInfo -> Maybe Name
+ctxInstClass (HIE.EvidenceVarBind (HIE.EvInstBind _ clsName) _ _) =
+  Just clsName
+ctxInstClass _ = Nothing
+
+-- | Build a map from occName to @DeclData@ for every top-level binding in
+-- the AST plus a per-file @ClassIndex@ mapping each class to the
+-- occurrence names of its instance methods within this file.  The global
+-- 'EvBindIndex' lets us recognise which 'Name's used inside a body's span
+-- are evidence variables for which class.
+buildFileIndex :: EvBindIndex -> HieData -> (Map String DeclData, ClassIndex)
+buildFileIndex globalEvBinds (HieData src ast) =
+    (Map.fromListWith mergeDeclData (concatMap nodeEntries nodes), classIdx)
+  where
+    nodes = flatNodes ast
     flatNodes n = n : concatMap flatNodes (HIE.nodeChildren n)
 
     nodeEntries node =
       [ (occNameString (nameOccName name),
-         DeclData [[extractSpanLines src nodeSpan]] (usedInBody nodeSpan))
+         DeclData
+           [[extractSpanLines src nodeSpan]]
+           (getUsedNames ast startLine endLine)
+           (getUsedClasses ast globalEvBinds startLine endLine))
       | (Right name, details) <- concatMap (Map.toList . HIE.nodeIdentifiers)
                                             (Map.elems (HIE.getSourcedNodeInfo (HIE.sourcedNodeInfo node)))
       , any isDeclCtx (Set.toList (HIE.identInfo details))
-      , let nodeSpan = HIE.nodeSpan node
+      , let nodeSpan          = HIE.nodeSpan node
+            (startLine, endLine) = bodyLineRange src nodeSpan
       ]
 
-    -- Collect names *used* (not bound) within the equation starting at this span.
-    -- We extend the span to the end of the equation using the same indentation
-    -- heuristic used for test bodies.
-    usedInBody nodeSpan =
-      let startLine = srcSpanStartLine nodeSpan
-          offset    = lineStartOffset src startLine
-          baseInd   = countIndent src offset
-          exprEnd   = findExprEnd src offset baseInd
-          bodyBytes = BS.take (exprEnd - offset) (BS.drop offset src)
-          endLine   = startLine + max 0 (BSC.count '\n' bodyBytes - 1)
-      in getUsedNames ast startLine endLine
+    -- A node is treated as an /instance node/ if any of its immediate
+    -- children carries an @EvidenceVarBind (EvInstBind _ cls)@
+    -- identifier — that is, the synthetic dictionary binding generated
+    -- by @instance C T where …@.  When we hit one, every @MatchBind@ or
+    -- @ValBind@ binder anywhere in that node's subtree is registered as a
+    -- method of @cls@.
+    --
+    -- We don't recurse further inside an instance node looking for /more/
+    -- instance nodes (Haskell forbids nested @instance@ declarations,
+    -- and method bodies' local bindings should already be reached via
+    -- the regular name-edge BFS).
+    classIdx :: ClassIndex
+    classIdx = Map.fromListWith Set.union (concatMap goClass [ast])
+      where
+        goClass node =
+          case nodeImmediateChildClasses node of
+            cls : _ ->
+              -- Treat this node as an instance node with class `cls`.
+              -- Collect every binding name in its subtree.
+              [ (cls, Set.singleton name)
+              | sub <- subtree node
+              , ni  <- Map.elems (HIE.getSourcedNodeInfo (HIE.sourcedNodeInfo sub))
+              , (Right n, details) <- Map.toList (HIE.nodeIdentifiers ni)
+              , any isBindCtx (Set.toList (HIE.identInfo details))
+              , let name = occNameString (nameOccName n)
+              ]
+            [] ->
+              concatMap goClass (HIE.nodeChildren node)
 
+        subtree n = n : concatMap subtree (HIE.nodeChildren n)
 
-    mergeDeclData (DeclData c1 u1) (DeclData c2 u2) =
-      DeclData (c1 ++ c2) (Set.union u1 u2)
+        nodeImmediateChildClasses node =
+          [ occNameString (nameOccName clsName)
+          | child <- HIE.nodeChildren node
+          , ni <- Map.elems (HIE.getSourcedNodeInfo (HIE.sourcedNodeInfo child))
+          , (Right _, details) <- Map.toList (HIE.nodeIdentifiers ni)
+          , Just clsName <- map ctxInstClass (Set.toList (HIE.identInfo details))
+          ]
+
+        isBindCtx HIE.MatchBind  = True
+        isBindCtx (HIE.ValBind {}) = True
+        isBindCtx _              = False
+
+    mergeDeclData (DeclData c1 u1 cl1) (DeclData c2 u2 cl2) =
+      DeclData (c1 ++ c2) (Set.union u1 u2) (Set.union cl1 cl2)
 
     isDeclCtx :: HIE.ContextInfo -> Bool
     isDeclCtx = \case
       HIE.ValBind {} -> True
       HIE.MatchBind  -> True
       HIE.Decl {}    -> True
+      -- 'TyDecl' tags identifiers appearing in their own type signature
+      -- (and in associated-type/class-method signature contexts).
+      -- Including it folds the signature line(s) into each binding's
+      -- chunk, so changes that touch only the signature — e.g.
+      -- swapping the order of variables in an explicit @forall@,
+      -- which is observable under @TypeApplications@ — invalidate
+      -- the cache.
+      HIE.TyDecl     -> True
       _              -> False
+
+-- | Compute the line-range of an equation body starting at this AST
+-- node's span, using the same indentation heuristic as 'computeTestFP'.
+bodyLineRange :: BS.ByteString -> RealSrcSpan -> (Int, Int)
+bodyLineRange src nodeSpan =
+  let startLine = srcSpanStartLine nodeSpan
+      offset    = lineStartOffset src startLine
+      baseInd   = countIndent src offset
+      exprEnd   = findExprEnd src offset baseInd
+      bodyBytes = BS.take (exprEnd - offset) (BS.drop offset src)
+      endLine   = startLine + max 0 (BSC.count '\n' bodyBytes - 1)
+  in  (startLine, endLine)
 
 -- | Collect the occurrence-name strings of all identifiers /used/ (not bound)
 -- within source lines @startLine..endLine@ in the AST.
@@ -546,29 +739,31 @@ getUsedNames root startLine endLine = go root
       , HIE.Use `Set.member` HIE.identInfo details
       ]
 
--- | True iff any identifier within the @startLine..endLine@ span carries
--- an 'HIE.EvidenceVarUse' context.  This flags test bodies whose result
--- depends on instance dictionaries resolved at the call site — the
--- scenario the dependency BFS is known to under-approximate.
-hasEvidenceUseInBody :: HIE.HieAST HIE.TypeIndex -> Int -> Int -> Bool
-hasEvidenceUseInBody root startLine endLine = go root
+-- | Collect the class names whose evidence is used within source lines
+-- @startLine..endLine@.  An evidence-variable use carries an
+-- 'HIE.EvidenceVarUse' context info; we look up the bound 'Name' (the
+-- dictionary) in the global 'EvBindIndex' to recover the class.
+getUsedClasses
+  :: HIE.HieAST HIE.TypeIndex
+  -> EvBindIndex
+  -> Int -> Int -> Set String
+getUsedClasses root globalEvBinds startLine endLine = go root
   where
     go node
-      | srcSpanEndLine   (HIE.nodeSpan node) < startLine = False
-      | srcSpanStartLine (HIE.nodeSpan node) > endLine   = False
+      | srcSpanEndLine   (HIE.nodeSpan node) < startLine = Set.empty
+      | srcSpanStartLine (HIE.nodeSpan node) > endLine   = Set.empty
       | otherwise =
-          nodeHasEvidenceUse node || any go (HIE.nodeChildren node)
+          let mine  = foldMap nodeClassUses
+                        (Map.elems (HIE.getSourcedNodeInfo (HIE.sourcedNodeInfo node)))
+              below = foldMap go (HIE.nodeChildren node)
+          in Set.union mine below
 
-    nodeHasEvidenceUse node = any niHas
-      (Map.elems (HIE.getSourcedNodeInfo (HIE.sourcedNodeInfo node)))
-
-    niHas ni = any detailsHas (Map.elems (HIE.nodeIdentifiers ni))
-
-    detailsHas details = any isEvidenceVarUse
-      (Set.toList (HIE.identInfo details))
-
-    isEvidenceVarUse HIE.EvidenceVarUse = True
-    isEvidenceVarUse _                  = False
+    nodeClassUses ni = Set.fromList
+      [ cls
+      | (Right name, details) <- Map.toList (HIE.nodeIdentifiers ni)
+      , HIE.EvidenceVarUse `Set.member` HIE.identInfo details
+      , Just cls <- [resolveEvClass globalEvBinds (uniqWord name)]
+      ]
 
 -- | Extract the source bytes covering lines @startLine..endLine@ (1-indexed).
 extractSpanLines :: BS.ByteString -> RealSrcSpan -> BS.ByteString
@@ -624,4 +819,42 @@ loadCache path = do
 
 saveCache :: FilePath -> Map String Fingerprint -> IO ()
 saveCache path m = writeFile path (show (Map.map fpToTuple m))
+
+-- ---------------------------------------------------------------------------
+-- Internal: testing helpers
+--
+-- These are exported for unit tests that need to drive the fingerprinting
+-- machinery against in-memory mutations of HIE-recorded source bytes (i.e.
+-- to simulate the effect of a code edit without recompiling).  They are not
+-- part of the stable API.
+
+-- | Load HIE files from @hieDir@, optionally substitute the source bytes
+-- of selected files (keyed by HIE filename, e.g. @"Instances.hie"@), and
+-- compute the fingerprint of the test whose leaf name matches
+-- @leafName@.
+internalComputeFingerprint
+  :: FilePath
+  -> Map FilePath BS.ByteString  -- ^ source overrides, keyed by HIE filename
+  -> Fingerprint                  -- ^ cabal hash to mix into the fingerprint
+  -> String                       -- ^ test leaf name
+  -> IO (Maybe Fingerprint)
+internalComputeFingerprint hieDir overrides cabalHash leafName = do
+  hieFiles <- sort . filter ((== ".hie") . takeExtension)
+                <$> listDirectory hieDir
+  nc <- initNameCache 'z' []
+  rawData <- mapM (\f -> (f,) <$> readHieData nc (hieDir </> f)) hieFiles
+  let original = [ (f, d) | (f, Just d) <- rawData ]
+      allData =
+        [ (f, case Map.lookup f overrides of
+                Just newSrc -> d { hdSrc = newSrc }
+                Nothing     -> d)
+        | (f, d) <- original
+        ]
+      globalEvBinds = Map.unions [ collectEvBinds d | (_, d) <- allData ]
+      indices = [ (f, buildFileIndex globalEvBinds d) | (f, d) <- allData ]
+      declMaps     = Map.fromList [ (f, dm) | (f, (dm, _)) <- indices ]
+      classIndices = Map.fromList [ (f, ci) | (f, (_, ci)) <- indices ]
+      fileSrcs     = Map.fromList [ (f, hdSrc d) | (f, d) <- allData ]
+  return (computeTestFP allData globalEvBinds declMaps classIndices
+                         fileSrcs cabalHash leafName)
 
