@@ -707,7 +707,7 @@ it, in order:
     changes in explicit forall's also invalidate the cache; i.e.
     `forall a b` vs `forall b a`, etc.*
 
-35. *Can you take a look at_every_ Haskell extension, decide if it
+35. *Can you take a look at _every_ Haskell extension, decide if it
     could pluasibly impact the general approach, and write some tests
     that confirm/deny those cases?*
 
