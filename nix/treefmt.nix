@@ -8,4 +8,6 @@
   # Haskell
   programs.stylish-haskell.enable = true;
   programs.hlint.enable = true;
+  settings.formatter.stylish-haskell.excludes = [ "test/MultiLinePragmaFix.hs" ];
+
 }
