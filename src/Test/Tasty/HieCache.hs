@@ -140,7 +140,7 @@ cacheable :: TestTree -> TestTree
 cacheable = localOption (HieCacheEnabled True)
 
 -- Internal option: set by 'cacheable', checked per-test in the ingredient.
-newtype HieCacheEnabled = HieCacheEnabled Bool deriving (Eq, Ord, Typeable)
+newtype HieCacheEnabled = HieCacheEnabled Bool deriving (Eq, Ord)
 
 instance IsOption HieCacheEnabled where
   defaultValue   = HieCacheEnabled False
@@ -149,7 +149,7 @@ instance IsOption HieCacheEnabled where
   optionHelp     = return "Enable HIE-based caching for this test subtree"
 
 -- | CLI flag: pass @--disable-tasty-cache@ to disable all caching.
-newtype HieCacheDisable = HieCacheDisable Bool deriving (Eq, Ord, Typeable)
+newtype HieCacheDisable = HieCacheDisable Bool deriving (Eq, Ord)
 
 instance IsOption HieCacheDisable where
   defaultValue   = HieCacheDisable False
@@ -348,7 +348,7 @@ data EvBind
 type EvBindIndex = Map Word64 EvBind
 
 uniqWord :: Name -> Word64
-uniqWord = getKey . nameUnique
+uniqWord = fromIntegral . getKey . nameUnique
 
 -- | Walk the 'EvBind' chain starting at @uniq@ to recover the class
 -- whose dictionary the bound evidence variable ultimately provides.
